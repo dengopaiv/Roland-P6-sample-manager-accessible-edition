@@ -1,7 +1,7 @@
 # PyP6 - Roland P-6 Sample Manager
-![Roland-P6-sample-manager](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_2_8_0.png)
+![Roland-P6-sample-manager](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_3_0_0_.png)
 
-**Version 2.8.0** - © 2026 Brian Siemund
+**Version 3.0.0** - © 2026 Brian Siemund
 
 ## Overview
 
@@ -10,8 +10,10 @@ across the 8 sample banks (A-H) and 6 pads per bank of the Roland AIRA P-6.
 It supports auditioning samples before loading, automatic MP3-to-WAV
 conversion, per-pad sample rate/pitch/mono conversion, non-destructive
 editing (trim, normalize, fade), transfers in both directions between the
-app and the device, presets that keep their samples with them, and building
-multi-sample "Chop" files from several source samples at once.
+app and the device, presets that keep their samples with them, building
+multi-sample "Chop" files from several source samples at once, and - new in
+3.0.0 - a **wavetable synthesizer** that turns a pad into 255 waveforms you
+step through with the START knob.
 
 > **Windows users:** a prebuilt **Windows x64 executable** is available,
 > built with PyInstaller and bundling **all dependencies, including
@@ -20,33 +22,88 @@ multi-sample "Chop" files from several source samples at once.
 
 ---
 
-## What's New in 2.8.0
+## What's New in 3.0.0
 
-- **Tooltips** - hover help on the pad controls, the bank buttons,
-  Undo/Redo, and the Chop and Load windows. Switchable in
-  Settings → Appearance; the change applies immediately.
-- **Chop: three normalize modes** - `Off`, `Per sample` (each slice is
-  lifted to full level on its own, for source samples recorded at
-  different volumes) and `Whole file` (only the finished multisample is
-  lifted, so the balance between slices is preserved). The waveform
-  preview and preview playback now show exactly what the chosen mode will
-  produce.
-- **About dialog** - reachable from Settings. Shows the version, author,
-  and the live state of every optional component (pydub, ffmpeg,
-  drag & drop, the resolved ffmpeg path, the config and temp folders),
-  with a "Copy Info" button for pasting into a bug report.
-- **Consistent truncation display** - the part of a sample that exceeds the
-  P-6's recording-time limit is shaded orange in *every* waveform view
-  (pad mini waveform, main playback waveform, pad editor, Chop). All four
-  now derive the cut point from a single shared calculation, so they can't
-  disagree.
-- **Readable button colors** - on the dark themes the colored buttons are
-  derived from the theme accent with the lightness reduced until white
-  text is properly legible, and the saturation eased back so a large block
-  of color doesn't dominate the window.
+### Wavetable synthesizer
+
+![Wavetable synthesizer](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_3_0_0_synth.png)
+
+The P-6 has no oscillators. It does have a START knob that steps through a
+sample in 256 positions - and if the sample is built so that every one of
+those positions lands exactly on a single waveform cycle, the knob becomes a
+wavetable position control. That is what the **Synth** button on each pad
+does.
+
+- **16 waveform families** - Saw, Pulse/PWM, Triangle, Sine, Wavefolder,
+  Hard Sync, FM, Phase Distortion, Staircase, Vowel Formant, Organ, Piano,
+  Strings, Brass, Bell/Metal and Noise Morph. Each one *morphs* across the
+  steps it is given rather than sitting still, so turning START sweeps
+  through a sound instead of jumping between presets.
+- **Pick and order them yourself** - Simple mode bakes all 16 in. Advanced
+  mode lets you choose which families to use and in what order, up to 16.
+  The 255 steps are shared out between them automatically.
+- **Three registers** - Bass, Mid and Lead, each with a root note you can
+  move ±6 semitones, plus a setting for how far up you intend to play, so
+  the table still sounds clean when you transpose it.
+- **Preview before you build** - click any family to hear a sweep through
+  it, and watch the waveforms it steps through in an isometric display, with
+  the currently sounding one highlighted.
+- **Ready for the device** - the pad gets its WAV plus a matching `.PRM`
+  file with the loop points and the right init patch, so it plays correctly
+  on the P-6 straight away. Set SIZE to 1 on the device and turn START.
+
+> **On the device:** START positions 0-254 each select one waveform.
+> Position 255 sits past the last one and does not produce a usable sound -
+> that is a property of the P-6, not a bug in the table.
+
+### Waveform Creator
+![Waveform Creator](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_3_0_0_waveform_creator.png)
+Not satisfied with the 16 built-in families? Draw your own.
+
+- **Draw two shapes with the mouse**, A and B, and the family morphs from
+  one to the other. Starting points (sine, triangle, saw, square) are there
+  to draw over, and a Smooth button takes out the shakiness.
+- **Or load a single-cycle WAV** - the sample rate, bit depth and length of
+  the file don't matter, only its shape. Single-cycle files are auditioned
+  as a held note at your chosen root note, so you can hear what you're
+  picking instead of a 7-millisecond click.
+- **See what will actually sound** - your line is drawn in blue, the
+  waveform as the P-6 will hold it in orange. The two differ wherever your
+  drawing has sharper corners than the P-6 can reproduce.
+- **Your waveforms are kept** - they go into a library under `~/.pyp6` and
+  are there in every wavetable you build afterwards, on any pad. They also
+  travel inside presets, so a preset you send someone else works on their
+  machine.
+
+### Everywhere else
+
+- **Click the big waveform to play from there** - and on a wavetable pad,
+  the click jumps to the start of the waveform zone you clicked in.
+- **A wavetable pad shows its layout** instead of a waveform: which family
+  occupies which stretch of the START range, with a playhead running through
+  it while it plays.
+- **Preset check** - saving or loading a preset now verifies that every
+  sample it lists is actually there and readable, and says so plainly if
+  something is missing. A preset folder is meant to be handed to someone
+  else; this catches the cases where it would fail on their machine.
+- **Consistent look** - the Chop, Load, preset and editor windows now use
+  the same rounded panels as the rest of the app, and every scrollbar is the
+  slim dark one.
+- **Better trimming on long files** - the zoom now goes as far as the file
+  needs, and the trim markers can be closed to 10 ms, so you can pull a
+  short hit out of a three-minute recording.
 
 ### Earlier in the 2.x line
 
+- **Tooltips** - hover help on the pad controls, the bank buttons,
+  Undo/Redo, and the Chop and Load windows. Switchable in
+  Settings → Appearance.
+- **Chop: three normalize modes** - `Off`, `Per sample` (each slice lifted
+  on its own, for sources recorded at different volumes) and `Whole file`
+  (only the finished multisample is lifted, so the balance between slices is
+  preserved).
+- **About dialog** - version, author, and the live state of every optional
+  component, with a "Copy Info" button for bug reports.
 - **Undo / Redo** - 5 steps across all banks, covering loading, removing,
   swapping, applying an edit, clearing a bank and loading a preset.
   `Ctrl+Z` / `Ctrl+Shift+Z` or `Ctrl+Y`.
@@ -56,8 +113,7 @@ multi-sample "Chop" files from several source samples at once.
   gives quick access to the last five.
 - **Pad waveform editor** - click a pad's mini waveform to open it: trim
   markers, zoom, normalize, and logarithmic fade-in/fade-out, previewed
-  live, then written back with "Apply to Pad" (undoable). The pad's rate,
-  pitch and mono settings are preserved.
+  live, then written back with "Apply to Pad" (undoable).
 - **Drag to swap pads** - drag a pad's sample name (or its frame) onto
   another pad to exchange the two, including all their settings. The
   target pad is outlined in orange while you drag.
@@ -145,7 +201,8 @@ pip install audioop-lts
 ```
 
 > Note: `matplotlib` is not required - waveforms are drawn directly on the
-> Tkinter canvas.
+> Tkinter canvas. The wavetable synthesizer needs nothing beyond `numpy`,
+> which is already in the list above.
 
 #### 2.2.3 Install ffmpeg
 
@@ -171,7 +228,7 @@ Settings → About shows which ffmpeg binary is actually in use.
 #### 2.2.4 Run the application
 
 ```
-python PyP6-Roland-P6-Sample-Manager_2_8_0.py
+python PyP6-Roland-P6-Sample-Manager_3_0_0.py
 ```
 
 ---
@@ -196,7 +253,7 @@ Run the app (the venv must be reactivated in every new terminal session):
 ```bash
 cd ~
 source p6env/bin/activate
-python3 -u ./PyP6-Roland-P6-Sample-Manager_2_8_0.py
+python3 -u ./PyP6-Roland-P6-Sample-Manager_3_0_0.py
 ```
 
 > If a feature appears to be missing, check **Settings → About** first - it
@@ -212,6 +269,8 @@ The tool keeps everything it needs under a single folder:
 ```
 ~/.pyp6/config.json     settings
 ~/.pyp6/temp/           trimmed / normalized / faded / chopped samples
+~/.pyp6/wavetables/     the WAV and PRM files of your wavetable pads
+~/.pyp6/waveforms.json  waveforms you drew or loaded yourself
 ```
 
 (on Windows: `C:\Users\<you>\.pyp6\`)
@@ -225,7 +284,8 @@ created and updated automatically; no manual setup is required. Delete
 The **temp folder** holds every edited sample that hasn't been saved into a
 preset. Settings → Temporary Files shows its size and can clear it - pads
 still pointing at a deleted file are cleared along with it, so save a preset
-first if you want to keep those edits.
+first if you want to keep those edits. Wavetables and your own waveforms
+live outside `temp/` and are never touched by clearing it.
 
 ---
 
@@ -239,7 +299,7 @@ folder in the background, so the window opens immediately. Use
 if needed. This is remembered across restarts.
 
 ### 5.2 Loading a sample onto a pad
-![Sample import](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_2_8_0_sample_loader.png)
+![Sample import](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_3_0_0_load.png)
 
 Click "Load" on any pad to open a file browser with folder navigation,
 sortable columns (Name / Length / Size), waveform preview and audition
@@ -349,7 +409,7 @@ Use the **Preset** button in the top bar:
 - **Recent** - the last five presets, one click away.
 
 ### 5.10 Chop feature - building a multi-sample from several files
-![Sample chop slice tool](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_2_8_0_chop_slice.png)
+![Sample chop slice tool](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_3_0_0_chop.png)
 Click "Chop" on any pad to combine several short samples (e.g. one-shot
 kicks, snares, hi-hats) into a single WAV file ready to be split into equal
 slices using the P-6's built-in **Chop** function in Sample Edit (Voice)
@@ -403,7 +463,79 @@ After building, load the file onto the P-6 as usual, enter Sample Edit
 (Voice) mode, and use the device's own **Chop** function to split it into
 the same number of slices chosen here.
 
-### 5.11 Settings
+### 5.11 Wavetable synthesizer
+
+Click **Synth** on an empty pad. The pad becomes a wavetable: one WAV
+holding 255 single-cycle waveforms in a row, plus a `.PRM` file that tells
+the P-6 how to loop them.
+
+**On the pad**
+
+1. Choose a **register** - Bass (around C2), Mid or Lead (around C3) - and
+   the **root note** within ±6 semitones. This is the pitch the pad plays
+   at.
+2. **Plays up to** tells the app how far above that note you intend to play.
+   The waveforms are built to stay clean over that range; leave it at 0 if
+   you'll only play near the root note.
+3. In **Simple** mode all 16 waveform families are used, about 16 steps
+   each. In **Advanced** mode you pick the families and their order, up to
+   16 of them.
+4. Click a family to hear a sweep through it, and to see the waveforms it
+   steps through in the Morph display. Tick **Autoplay on click** to hear
+   each one as you click it.
+5. Choose an **init patch** (Init, Acid, Bass, Pad, Reso...) - these set the
+   P-6's filter and envelope so the pad is playable immediately - and
+   **Build Wavetable**.
+
+**On the P-6**
+
+Transfer the bank as usual, then on the device set **SIZE to 1** and turn
+**START**. Each of the 256 knob positions selects a different waveform.
+The last position (255) is past the end of the table and won't sound
+useful - use 0 to 254.
+
+You can play the pad in the app too. It plays the whole table front to back,
+slowed down so each waveform is audible, with the layout shown at the bottom
+of the window.
+
+> Editing a wavetable pad's audio would throw the START knob out of step
+> with the waveforms, so Load and Chop are greyed out on it. **Synth** stays
+> available - it reopens with your settings so you can change the note or
+> the family list and rebuild. Eject first if you want a normal sample
+> there.
+
+### 5.12 Waveform Creator - your own waveforms
+
+The ✎ button between the two lists opens the Waveform Creator. Whatever you
+make there joins the list on the left as its own family, and can be moved
+into the step order like any built-in one.
+
+You build **two shapes**, A and B, and the family morphs from one to the
+other across its steps. Leave B alone and it copies A, which gives you a
+family that doesn't move.
+
+- **Draw** with the mouse. Start from a sine, triangle, saw or square and
+  draw over it; **Smooth** takes out the shakiness of a freehand line.
+- **Load...** reads a single-cycle WAV instead. The file's sample rate,
+  bit depth and length don't matter - only its shape is used, and the pitch
+  comes from your chosen root note. Single-cycle files are previewed as a
+  held note so you can actually hear them.
+- The **orange line** shows what the P-6 will hold, over your blue drawing.
+  They differ wherever your line has sharper corners than the P-6 can
+  reproduce. If you drew more above the centre line than below, the shape
+  settles back onto the middle - that's normal and you won't hear it.
+
+Waveforms you make are saved under `~/.pyp6/waveforms.json` and are
+available in every wavetable afterwards, on any pad. **Delete** in the
+creator, or the ✕ button next to the list, removes one again; wavetables
+already built with it keep working. They are also stored inside presets, so
+a preset with your own waveforms works on someone else's machine.
+
+> A normal sample is not a single-cycle file. Load a drum loop here and the
+> whole recording is squeezed into one waveform - what comes out follows its
+> rough shape and sounds nothing like it. The app warns you first.
+
+### 5.13 Settings
 
 Open Settings (gear icon) for:
 
@@ -415,8 +547,8 @@ Open Settings (gear icon) for:
 - **Audio Components** - the state of pydub and ffmpeg, plus manual
   ffmpeg/ffprobe path overrides (not needed with the prebuilt executable,
   where ffmpeg is bundled)
-- **Defaults** - autoplay behavior for the Load/Chop dialogs, default Chop
-  slice count, and the storage warning threshold in MB
+- **Defaults** - how the Autoplay switch starts out in the preview
+  windows, default Chop slice count, and the storage warning threshold in MB
 - **Temporary Files** - current size, and "Clear Now"
 - **About** - version, author, and the exact state of every optional
   component, with "Copy Info"
@@ -443,6 +575,12 @@ Open Settings (gear icon) for:
 | Dropping files onto pads never works | Check **Settings → About**: if it says `tkinterdnd2 not available`, run `pip install tkinterdnd2` - into the venv you actually start the app from, which is the usual catch. |
 | A drop is occasionally missed on Linux | Known under Wayland; About will show drag & drop as `active`. Drag the file again, or use the pad's "Load" button. |
 | Startup problems you want to diagnose | Launch with `PYP6_DEBUG=1` for a timed startup log listing every phase and which optional components loaded. |
+| The wavetable sounds wrong on the device | SIZE must be 1. At any other SIZE the loop covers more or less than one waveform and the pitch is off. |
+| START at maximum sounds an octave up | Position 255 is past the last waveform. Use 0 to 254. |
+| A family barely changes across its steps | Give it more room by putting fewer families in the step order. |
+| Load and Chop are greyed out on a pad | It holds a wavetable. Eject it to use the pad for a normal sample; Synth stays available for changing the table. |
+| Someone else's preset is missing a waveform | It was saved with a version that didn't store your own waveforms, or the shape data was lost. The preset check names the family; ask for a re-save. |
+| A loaded single-cycle file sounds dull | Short files carry less detail - there is simply less in them to hear. That is the file, not the app. |
 
 ---
 
@@ -455,9 +593,8 @@ bundle ffmpeg/ffprobe the same way the prebuilt executable does:
 ```
 pip install pyinstaller
 
-python -m PyInstaller PyP6-Roland-P6-Sample-Manager_2_8_0.py -y -w --onefile ^
+python -m PyInstaller PyP6-Roland-P6-Sample-Manager_3_0_0.py -y -w --onefile ^
   --icon=icon.ico ^
-  --add-data "pyp6logo.png;." ^
   --collect-data tkinterdnd2 ^
   --add-binary "C:\ffmpeg\bin\ffmpeg.exe;." ^
   --add-binary "C:\ffmpeg\bin\ffprobe.exe;." ^
@@ -466,8 +603,11 @@ python -m PyInstaller PyP6-Roland-P6-Sample-Manager_2_8_0.py -y -w --onefile ^
 
 Notes:
 
-- Use `;` as the separator for `--add-data`/`--add-binary` on Windows (not
-  `:`, which is reserved for Unix/macOS paths).
+- The logo is built into the script, so there is no `--add-data` line for
+  it any more. Drop a `pyp6logo.png` next to the script if you want to use
+  your own instead.
+- Use `;` as the separator for `--add-binary` on Windows (not `:`, which is
+  reserved for Unix/macOS paths).
 - `--collect-data tkinterdnd2` is required if you want drag & drop in the
   build: the package ships native Tcl extension files, not just `.py`
   modules, and PyInstaller will not pick those up on its own. Leave the
