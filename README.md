@@ -243,7 +243,16 @@ cd ~
 python3 -m venv p6env
 source p6env/bin/activate
 pip install sounddevice soundfile pydub numpy
+```
 
+**Python 3.13 and newer** removed the `audioop` module that `pydub` depends
+on internally. Install the backport as well:
+
+```bash
+pip install audioop-lts
+```
+
+```bash
 # optional - drag & drop from the file manager (see the caveat in 5.5)
 pip install tkinterdnd2
 ```
