@@ -305,7 +305,7 @@ live outside `temp/` and are never touched by clearing it.
 On first launch, the tool attempts to auto-detect a mounted P-6 IMPORT
 folder in the background, so the window opens immediately. Use
 **Settings → IMPORT Folder → Change...** to point it to the correct location
-if needed. This is remembered across restarts. On most computers you weill see a device called P-6. Insede there is a folder called IMPORT. This you have to open until you can see the BANK folders.
+if needed. This is remembered across restarts. On most computers you will see a device called P-6. Insede there is a folder called IMPORT. This you have to open and then you can see the BANK_A-H folders.
 
 ### 5.2 Loading a sample onto a pad
 ![Sample import](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6-Roland-P6-Sample-Manager_3_0_0_load.png)
