@@ -72,6 +72,23 @@ import tkinter as tk
 from tkinter import ttk
 _log_timing("tkinter imported")
 
+# Screen reader + keyboard layer. Its own module because the speech
+# backends and the generic focus/dialog plumbing are worth being able to
+# test without starting the whole app; everything below talks to the one
+# `a11y` service object.
+try:
+    from pyp6_accessibility import (
+        a11y, install_dialog_support, prepare_dialog, first_focusable,
+        focusable_within, is_focusable,
+    )
+except ImportError as _a11y_import_error:  # pragma: no cover - packaging slip
+    raise SystemExit(
+        "pyp6_accessibility.py is missing - it has to sit next to this "
+        "script (or be bundled alongside it).\n"
+        "Import failed with: %s" % _a11y_import_error
+    )
+_log_timing("accessibility layer imported")
+
 try:
     # Optional: enables dragging sample files from the OS file manager
     # straight onto a pad. Not a hard requirement - without it the app runs
@@ -301,6 +318,9 @@ def collect_about_info():
     else:
         rows.append(("ffmpeg", "not found"))
     rows.append(("Drag & drop", dnd_status_text()))
+    rows.append(("Speech output", a11y.backend_name() if a11y.speech_available
+                 else "none found - the app cannot announce anything"))
+    rows.append(("Speech", "on" if a11y.enabled else "off (Ctrl+Shift+S)"))
     rows.append(("Settings file", CONFIG_FILE))
     rows.append(("Temp folder", TEMP_DIR))
     return rows
@@ -717,6 +737,39 @@ BTN_RED = fill_for_white_text(ACCENT_RED)
 BTN_ORANGE = fill_for_white_text(ACCENT_ORANGE)
 BTN_PURPLE = fill_for_white_text(ACCENT_PURPLE)
 
+# Keyboard focus indicator. Amber rather than ACCENT_BLUE on purpose: the
+# blue is already spoken for (active pad, panel titles, dropdown arrows),
+# and a focus ring has to read as "the keyboard is here" against all of
+# BTN_BLUE, BTN_GREEN, BTN_RED, BG_INPUT and the panel background at once.
+FOCUS_RING = "#FFC400"
+FOCUS_RING_WIDTH = 3
+
+# Spoken names for the controls captioned with a symbol. Keyed on the
+# caption rather than on the widget, because several of these captions
+# toggle to show state - a play triangle becomes a stop square - and going
+# through the caption keeps the announcement in step with what the button
+# will actually do when pressed.
+GLYPH_NAMES = {
+    "\u25b6": "Play",
+    "\u25a0": "Stop",
+    "\u25b6 Preview": "Play preview",
+    "\u25a0 Stop": "Stop preview",
+    "\u2699": "Settings",
+    "\u21b6": "Undo",
+    "\u21b7": "Redo",
+    "\u23cf": "Remove sample",
+    "\u270e": "Draw shape",
+    "\u2715": "Delete shape",
+    "\u2191 Up": "Up one folder",
+    "A \u2192 B": "Copy lane A to lane B",
+    "Preset \u25be": "Preset menu",
+    "Banks \u2192 P6": "Copy banks to the P-6",
+    "P6 \u2192 Bank": "Import from the P-6 into this bank",
+    "\u2212": "Minus",
+    "+": "Plus",
+}
+a11y.caption_names = GLYPH_NAMES
+
 MAIN_MIN_W = 1000
 # Windows needs more headroom than Linux for the same content: its title
 # bar and window borders are taller, and the default UI font renders a few
@@ -826,10 +879,44 @@ def style_checkbutton(cb, bg=None):
               font=(UI_FAMILY, 9))
 
 
+def draw_round_outline(canvas, x1, y1, x2, y2, r, color, width=2):
+    """Rounded-rectangle ring: four corner arcs plus four straight edges.
+
+    Deliberately not the _round_rect shape with an empty fill - that one is
+    made of pieslices and rectangles, so outlining it draws the corner radii
+    and the seams between the pieces straight across the control.
+    """
+    inset = width / 2
+    x1, y1, x2, y2 = x1 + inset, y1 + inset, x2 - inset, y2 - inset
+    r = max(1, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
+    for cx, cy, start in ((x1, y1, 90), (x2 - 2 * r, y1, 0),
+                          (x1, y2 - 2 * r, 180), (x2 - 2 * r, y2 - 2 * r, 270)):
+        canvas.create_arc(cx, cy, cx + 2 * r, cy + 2 * r, start=start,
+                          extent=90, style="arc", outline=color, width=width)
+    canvas.create_line(x1 + r, y1, x2 - r, y1, fill=color, width=width)
+    canvas.create_line(x1 + r, y2, x2 - r, y2, fill=color, width=width)
+    canvas.create_line(x1, y1 + r, x1, y2 - r, fill=color, width=width)
+    canvas.create_line(x2, y1 + r, x2, y2 - r, fill=color, width=width)
+
+
+def draw_focus_ring(canvas, width_px, height_px, radius=10):
+    """The single visual answer to "where is the keyboard?" for the canvas
+    controls - drawn identically on buttons, dropdowns and waveforms so it
+    is one shape to learn rather than three."""
+    draw_round_outline(canvas, 2, 2, max(6, width_px - 2), max(6, height_px - 2),
+                       max(1, radius - 1), FOCUS_RING, FOCUS_RING_WIDTH)
+
+
 class RoundedButton(tk.Canvas):
     def __init__(self, parent, text="", command=None, bg=BTN_BLUE, fg="#FFFFFF",
                  parent_bg=None, width=110, height=32, radius=10,
-                 font=(UI_FAMILY, 9, "bold"), state="normal", outline_color=None):
+                 font=(UI_FAMILY, 9, "bold"), state="normal", outline_color=None,
+                 a11y_name=None):
+        # a11y_name: what to call this button out loud, for the ones captioned
+        # with a bare symbol. Only needed where the symbol alone is ambiguous -
+        # "+" is Zoom in here and Pitch up there - since a caption that names
+        # itself ("Cancel") and the shared glyph table between them already
+        # cover everything else.
         parent_bg = parent_bg or parent.cget("bg")
         super().__init__(parent, width=width, height=height, bg=parent_bg,
                           highlightthickness=0, bd=0, cursor="hand2")
@@ -843,10 +930,26 @@ class RoundedButton(tk.Canvas):
         self.height = height
         self._state = state
         self.outline_color = outline_color
+        self._has_focus = False
+        # Announced as a button, not as the Canvas it happens to be built
+        # from - the implementation detail is nobody else's problem.
+        a11y.label(self, role="button", name=a11y_name)
+        # A Canvas is not in the Tab order by default, which is exactly why
+        # none of these buttons could be reached without a mouse. Opting in
+        # explicitly (rather than relying on Tk's "does it have key
+        # bindings?" heuristic) also keeps the order predictable.
+        self.configure(takefocus=1 if state == "normal" else 0)
         self._draw()
         self.bind("<Button-1>", self._on_click)
         self.bind("<Enter>", self._on_enter)
         self.bind("<Leave>", self._on_leave)
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        # Return, keypad Enter and Space all reach the same handler the mouse
+        # uses, so there is one command path to keep correct rather than two.
+        self.bind("<Return>", self._on_activate_key)
+        self.bind("<KP_Enter>", self._on_activate_key)
+        self.bind("<space>", self._on_activate_key)
 
     def _round_rect(self, x1, y1, x2, y2, r, **kw):
         self.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, style="pieslice", **kw)
@@ -866,6 +969,8 @@ class RoundedButton(tk.Canvas):
         if self.outline_color and self._state == "normal":
             self._round_outline(1, 1, self.width - 1, self.height - 1,
                                 self.radius, self.outline_color, 2)
+        if self._has_focus:
+            draw_focus_ring(self, self.width, self.height, self.radius)
         text_fg = self.fg_color if self._state == "normal" else FG_MUTED
         self.create_text(self.width / 2, self.height / 2, text=self.text,
                           fill=text_fg, font=self.font)
@@ -873,23 +978,9 @@ class RoundedButton(tk.Canvas):
         _PERF["button_draw_time"] += time.time() - _t0
 
     def _round_outline(self, x1, y1, x2, y2, r, color, width=2):
-        """Rounded-rectangle ring: four corner arcs plus four straight edges.
-
-        Deliberately not _round_rect with an empty fill - that shape is made
-        of pieslices and rectangles, so outlining it draws the corner radii
-        and the seams between the pieces straight across the button.
-        """
-        inset = width / 2
-        x1, y1, x2, y2 = x1 + inset, y1 + inset, x2 - inset, y2 - inset
-        r = max(1, min(r, (x2 - x1) / 2, (y2 - y1) / 2))
-        for cx, cy, start in ((x1, y1, 90), (x2 - 2 * r, y1, 0),
-                              (x1, y2 - 2 * r, 180), (x2 - 2 * r, y2 - 2 * r, 270)):
-            self.create_arc(cx, cy, cx + 2 * r, cy + 2 * r, start=start,
-                            extent=90, style="arc", outline=color, width=width)
-        self.create_line(x1 + r, y1, x2 - r, y1, fill=color, width=width)
-        self.create_line(x1 + r, y2, x2 - r, y2, fill=color, width=width)
-        self.create_line(x1, y1 + r, x1, y2 - r, fill=color, width=width)
-        self.create_line(x2, y1 + r, x2, y2 - r, fill=color, width=width)
+        """Kept as a method for the existing call sites; the drawing itself
+        moved to module level so the dropdown and the waveforms can share it."""
+        draw_round_outline(self, x1, y1, x2, y2, r, color, width)
 
     def _darken(self, hex_color, amount=26):
         hex_color = hex_color.lstrip("#")
@@ -915,6 +1006,31 @@ class RoundedButton(tk.Canvas):
         if self._state == "normal" and self.command:
             self.command()
 
+    def _on_focus_in(self, _event=None):
+        self._has_focus = True
+        self._draw()
+
+    def _on_focus_out(self, _event=None):
+        self._has_focus = False
+        self._draw()
+
+    def _on_activate_key(self, _event=None):
+        """Return/Space press. Returns "break" so the same keystroke cannot
+        also reach a parent binding - Space plays the selection in the audio
+        browser, and a button press there must not do both."""
+        if self._state != "normal" or not self.command:
+            a11y.speak("%s, unavailable" % (self.text or "Button"))
+            return "break"
+        a11y.note_keyboard_activation()
+        self.command()
+        return "break"
+
+    def set_text(self, text):
+        """Changing the caption changes the accessible name with it, since the
+        name is read from .text - callers must not poke the attribute."""
+        self.text = text
+        self._draw()
+
     def set_outline(self, color):
         """Ring around the button, or None to remove it."""
         if color != self.outline_color:
@@ -923,6 +1039,10 @@ class RoundedButton(tk.Canvas):
 
     def config_state(self, state):
         self._state = state
+        # A disabled button leaves the Tab order too. Keeping it in would
+        # stop the keyboard on a control that cannot do anything, which is
+        # exactly the dead end the focus ring is supposed to rule out.
+        self.configure(takefocus=1 if state == "normal" else 0)
         self._draw()
 
 
@@ -949,11 +1069,32 @@ class RoundedDropdown(tk.Canvas):
         # (the bank selector uses this for Move/Copy To) without this generic
         # widget having to know anything about banks.
         self.entry_builder = entry_builder
+        self._has_focus = False
+        a11y.label(self, role="combo box",
+                   position=lambda: self._position_text())
+        self.configure(takefocus=1)
         self._draw()
         self.bind("<ButtonRelease-1>", self._open_menu)
         self.bind("<Enter>", lambda e: self._draw(hover=True))
         self.bind("<Leave>", lambda e: self._draw(hover=False))
         self.variable.trace_add("write", lambda *a: self._draw())
+        self.bind("<FocusIn>", self._on_focus_in)
+        self.bind("<FocusOut>", self._on_focus_out)
+        # Arrow keys step through the values in place, the way a Windows
+        # combo box does. That matters more than it looks: a posted tk.Menu
+        # is drawn by Tk, so no screen reader can see it, and stepping is
+        # the only path through the list that is reliably readable.
+        self.bind("<Up>", lambda e: self._step(-1))
+        self.bind("<Down>", lambda e: self._step(1))
+        self.bind("<Prior>", lambda e: self._step(-5))
+        self.bind("<Next>", lambda e: self._step(5))
+        self.bind("<Home>", lambda e: self._jump(0))
+        self.bind("<End>", lambda e: self._jump(-1))
+        # Return/Alt+Down still open the full list, including the entries a
+        # plain value cannot express (the bank selector's Copy To / Move To
+        # cascades) - as a readable list rather than a drawn menu.
+        for sequence in ("<Return>", "<KP_Enter>", "<space>", "<Alt-Down>", "<F4>"):
+            self.bind(sequence, self._open_menu_keyboard)
 
     def _round_rect(self, x1, y1, x2, y2, r, **kw):
         self.create_arc(x1, y1, x1 + 2*r, y1 + 2*r, start=90, extent=90, style="pieslice", **kw)
@@ -972,10 +1113,18 @@ class RoundedDropdown(tk.Canvas):
                           fill=FG_TEXT, font=self.font, anchor="w")
         self.create_text(self.width - 14, self.height / 2, text="\u25be",
                           fill=ACCENT_BLUE, font=(UI_FAMILY, 8), anchor="e")
+        if self._has_focus:
+            draw_focus_ring(self, self.width, self.height, self.radius)
         _PERF["dropdown_draws"] += 1
         _PERF["dropdown_draw_time"] += time.time() - _t0
 
-    def _open_menu(self, event):
+    def _build_menu(self):
+        """The list of entries, as a tk.Menu.
+
+        Built once and presented two ways - posted for the mouse, walked as a
+        list for the keyboard - so the entries (and the entry_builder's
+        cascades) can never drift apart between the two.
+        """
         menu = tk.Menu(self, tearoff=0, bg=BG_INPUT, fg=FG_TEXT,
                         activebackground=ACCENT_BLUE, activeforeground="#00131A",
                         font=self.font, bd=0, relief="flat")
@@ -986,7 +1135,60 @@ class RoundedDropdown(tk.Canvas):
                 continue  # the builder supplied its own entry for this value
             menu.add_command(label=str(v), command=lambda val=v: self._select(val), **kwargs)
         menu.bind("<Escape>", lambda e: menu.unpost())
-        menu.tk_popup(event.x_root, event.y_root)
+        return menu
+
+    def _open_menu(self, event):
+        self._build_menu().tk_popup(event.x_root, event.y_root)
+
+    def _open_menu_keyboard(self, _event=None):
+        open_menu_accessibly(self, self._build_menu(),
+                             title=a11y.name_of(self) or "Options")
+        return "break"
+
+    def _on_focus_in(self, _event=None):
+        self._has_focus = True
+        self._draw()
+
+    def _on_focus_out(self, _event=None):
+        self._has_focus = False
+        self._draw()
+
+    def _position_text(self):
+        """"3 of 8" for the value on show, so arrowing through a list tells
+        you where you are in it and when you have run out of list."""
+        index = self._current_index()
+        if index < 0:
+            return None
+        return "%d of %d" % (index + 1, len(list(self.values)))
+
+    def _value_strings(self):
+        return [str(v) for v in self.values]
+
+    def _current_index(self):
+        try:
+            return self._value_strings().index(str(self.variable.get()))
+        except ValueError:
+            return -1
+
+    def _apply_index(self, index):
+        values = list(self.values)
+        if not values:
+            return "break"
+        index = max(0, min(len(values) - 1, index))
+        value = values[index]
+        if str(value) != str(self.variable.get()):
+            self._select(value)
+        a11y.speak("%s, %d of %d" % (value, index + 1, len(values)), dedupe=False)
+        return "break"
+
+    def _step(self, delta):
+        current = self._current_index()
+        # An unrecognised current value (a bank letter the list no longer
+        # holds, say) starts at the top rather than silently doing nothing.
+        return self._apply_index(0 if current < 0 else current + delta)
+
+    def _jump(self, index):
+        return self._apply_index(index if index >= 0 else len(list(self.values)) - 1)
 
     def _select(self, val):
         self.variable.set(val)
@@ -1021,8 +1223,14 @@ class RoundedPanel(tk.Frame):
         self._title_fg = title_fg
         self._title_font = title_font
 
-        self.canvas = tk.Canvas(self, bg=parent_bg, highlightthickness=0, bd=0, width=1, height=1)
+        # takefocus=0: this canvas is the panel's rounded border and title,
+        # nothing more. Tk's default heuristic would put it in the Tab order
+        # anyway (it has <Configure>/<Enter> bindings), giving the keyboard a
+        # stop with nothing to do on it.
+        self.canvas = tk.Canvas(self, bg=parent_bg, highlightthickness=0, bd=0,
+                                width=1, height=1, takefocus=0)
         self.canvas.grid(row=0, column=0, sticky="nsew")
+        a11y.skip(self.canvas)
 
         self.body = tk.Frame(self, bg=panel_bg)
         self.body.grid(row=0, column=0, sticky="nsew", padx=body_padx, pady=body_pady)
@@ -1153,6 +1361,10 @@ class _DarkMessageDialog(tk.Toplevel):
         style_toplevel(self)
         self.resizable(False, False)
         self.result = None
+        # The message *is* the dialog. Read verbatim rather than summarised,
+        # and before the button, since the button name ("Yes") means nothing
+        # without the question it answers.
+        self._a11y_message = str(message)
 
         icon_char, icon_color = self._ICONS.get(kind, self._ICONS["info"])
 
@@ -1277,6 +1489,9 @@ class _DarkTextPromptDialog(tk.Toplevel):
                           highlightbackground=BORDER_COLOR, highlightcolor=ACCENT_BLUE,
                           font=(UI_FAMILY, 10), width=32)
         entry.pack(fill="x")
+        # The prompt above the field is its name - there is nothing else to
+        # go on, and this dialog is reused for every "type something" case.
+        a11y.label(entry, name=str(prompt).rstrip(":"))
         entry.bind("<Return>", lambda e: self._on_ok())
         entry.bind("<Escape>", lambda e: self._on_cancel())
         entry.focus_set()
@@ -1325,6 +1540,221 @@ def dark_ask_text(parent, title, prompt, initial=""):
     dlg = _DarkTextPromptDialog(root, title, prompt, initial)
     root.wait_window(dlg)
     return dlg.result
+
+
+def menu_entries(menu):
+    """Walks a tk.Menu into plain data: (index, label, kind, submenu).
+
+    Separators and tearoff slots are dropped - they are visual scaffolding
+    with nothing to activate, and a list that reads out three blank rows is
+    worse than one that reads five real ones.
+    """
+    entries = []
+    try:
+        last = menu.index("end")
+    except tk.TclError:
+        last = None
+    if last is None:
+        return entries
+    for index in range(int(last) + 1):
+        try:
+            kind = menu.type(index)
+        except tk.TclError:
+            continue
+        if kind in ("separator", "tearoff"):
+            continue
+        try:
+            label = str(menu.entrycget(index, "label"))
+        except tk.TclError:
+            continue
+        submenu = None
+        if kind == "cascade":
+            try:
+                name = str(menu.entrycget(index, "menu"))
+                submenu = menu.nametowidget(name) if name else None
+            except (tk.TclError, KeyError):
+                submenu = None
+        entries.append((index, label, kind, submenu))
+    return entries
+
+
+class AccessibleMenuDialog(tk.Toplevel):
+    """A tk.Menu, presented as a list a keyboard and a screen reader can use.
+
+    Tk draws its own popup menus. They look right and they take mouse clicks,
+    but they are pixels - there is no accessible object behind an entry, so a
+    screen reader user has no way to know what is on offer, let alone pick
+    the third item of a nested Copy To cascade.
+
+    Rather than duplicate every menu's contents in a second, hand-written
+    form (which would drift the first time an entry changed), this walks the
+    real tk.Menu that the mouse path posts and renders the same entries into
+    a Listbox. Cascades drill down in place with Right/Enter and back out
+    with Left/Backspace, and picking an entry invokes it on the original
+    menu - so there is exactly one definition of what the menu does.
+    """
+
+    def __init__(self, parent, menu, title="Menu"):
+        super().__init__(parent)
+        self.title(title)
+        style_toplevel(self)
+        self.resizable(False, False)
+        self._menu = menu
+        # (menu, title) for each level above the one on screen, so Left can
+        # walk back out of a cascade the same way it walked in.
+        self._stack = []
+        self._entries = []
+        self._pending = None
+
+        body = tk.Frame(self, bg=BG_DARK, padx=14, pady=12)
+        body.pack(fill="both", expand=True)
+
+        self.path_label = tk.Label(body, text=title, anchor="w")
+        style_label(self.path_label, font=(UI_FAMILY, 10, "bold"))
+        self.path_label.pack(fill="x", pady=(0, 6))
+        a11y.skip(self.path_label)
+
+        self.listbox = tk.Listbox(body, height=min(14, max(4, len(menu_entries(menu)))),
+                                  width=44, exportselection=False,
+                                  activestyle="none")
+        style_listbox(self.listbox)
+        self.listbox.pack(fill="both", expand=True)
+        a11y.label(self.listbox, name=title, role="menu")
+
+        hint = tk.Label(body, anchor="w", justify="left",
+                        text="Enter chooses \u2022 Right opens a submenu \u2022 "
+                             "Left goes back \u2022 Escape closes")
+        style_label(hint, fg=FG_MUTED, font=(UI_FAMILY, 8))
+        hint.pack(fill="x", pady=(6, 0))
+        a11y.skip(hint)
+
+        self.listbox.bind("<Return>", self._on_activate)
+        self.listbox.bind("<KP_Enter>", self._on_activate)
+        self.listbox.bind("<Double-Button-1>", self._on_activate)
+        self.listbox.bind("<Right>", self._on_descend)
+        self.listbox.bind("<Left>", self._on_ascend)
+        self.listbox.bind("<BackSpace>", self._on_ascend)
+        self.listbox.bind("<Escape>", lambda e: self.on_cancel())
+
+        self.protocol("WM_DELETE_WINDOW", self.on_cancel)
+        self._load(menu, title)
+        self.transient(parent)
+        self.update_idletasks()
+        center_toplevel_on_parent(self, parent)
+        self._safe_grab()
+        self.listbox.focus_set()
+
+    def _safe_grab(self, attempt=0):
+        try:
+            self.update_idletasks()
+            self.grab_set()
+        except tk.TclError:
+            if attempt < 10:
+                self.after(50, lambda: self._safe_grab(attempt + 1))
+
+    def _load(self, menu, title, announce=True):
+        self._menu = menu
+        self._entries = menu_entries(menu)
+        self.path_label.config(text=title)
+        self.listbox.delete(0, "end")
+        for _index, label, kind, _submenu in self._entries:
+            suffix = "  \u25b8" if kind == "cascade" else ""
+            self.listbox.insert("end", label + suffix)
+        if self._entries:
+            self.listbox.selection_set(0)
+            self.listbox.activate(0)
+            self.listbox.see(0)
+        a11y.label(self.listbox, name=title)
+        if announce:
+            a11y.speak("%s, %d items. %s" % (
+                title, len(self._entries),
+                self._spoken_entry(0) if self._entries else "empty"),
+                dedupe=False)
+
+    def _spoken_entry(self, position):
+        _index, label, kind, _submenu = self._entries[position]
+        return "%s%s, %d of %d" % (label, ", submenu" if kind == "cascade" else "",
+                                   position + 1, len(self._entries))
+
+    def _selected(self):
+        selection = self.listbox.curselection()
+        if not selection:
+            return None
+        return self._entries[int(selection[0])]
+
+    def _on_descend(self, _event=None):
+        entry = self._selected()
+        if entry is None or entry[3] is None:
+            return "break"
+        self._stack.append((self._menu, self.path_label.cget("text")))
+        self._load(entry[3], entry[1])
+        return "break"
+
+    def _on_ascend(self, _event=None):
+        if not self._stack:
+            # Left at the top level closes, matching how a real menu behaves
+            # when you walk off its left edge.
+            self.on_cancel()
+            return "break"
+        menu, title = self._stack.pop()
+        self._load(menu, title)
+        return "break"
+
+    def _on_activate(self, _event=None):
+        entry = self._selected()
+        if entry is None:
+            return "break"
+        if entry[3] is not None:
+            return self._on_descend()
+        # Invoke *after* this window is gone. The entry's command may open
+        # another dialog, and doing that while this one still holds the grab
+        # leaves the new window unable to take input.
+        self._pending = (self._menu, entry[0])
+        self.destroy()
+        return "break"
+
+    def on_cancel(self):
+        self._pending = None
+        try:
+            self.grab_release()
+        except tk.TclError:
+            pass
+        self.destroy()
+
+    def run(self):
+        """Shows the dialog and then performs whatever was chosen."""
+        self.wait_window()
+        if self._pending is None:
+            return False
+        menu, index = self._pending
+        try:
+            menu.invoke(index)
+        except tk.TclError:
+            return False
+        return True
+
+
+def open_menu_accessibly(widget, menu, title="Menu"):
+    """Presents `menu` as a keyboard-navigable list rooted at `widget`."""
+    dialog = AccessibleMenuDialog(widget.winfo_toplevel(), menu, title=title)
+    return dialog.run()
+
+
+def show_popup_menu(menu, widget, x_root=None, y_root=None, title="Menu"):
+    """Posts `menu` under the mouse, or opens the readable list if the click
+    that got here was actually a key press.
+
+    One call site, two presentations - so a menu can never gain an entry that
+    only one of the two input methods can reach.
+    """
+    if a11y.activated_by_keyboard():
+        return open_menu_accessibly(widget, menu, title=title)
+    if x_root is None:
+        x_root = widget.winfo_rootx()
+    if y_root is None:
+        y_root = widget.winfo_rooty() + widget.winfo_height()
+    menu.tk_popup(x_root, y_root)
+    return None
 
 
 def load_drawn_library():
@@ -1660,6 +2090,45 @@ def apply_saved_storage_threshold():
 
 TOOLTIP_DELAY_MS = 550       # long enough that they don't fire while just passing over
 TOOLTIP_WRAPLENGTH = 320
+
+
+def load_speech_enabled():
+    """Whether the app speaks. On by default.
+
+    Defaulting to on is the whole point: a screen reader user should not have
+    to find and tick a box in a dialog they cannot hear in order to hear the
+    dialog. Anyone who does not want it turns it off once and it stays off.
+    """
+    try:
+        return bool(load_config().get("speech_enabled", True))
+    except Exception:
+        return True
+
+
+def load_speech_verbosity():
+    """"normal" reads the hover help along with a control; "brief" does not."""
+    try:
+        value = str(load_config().get("speech_verbosity", "normal"))
+    except Exception:
+        return "normal"
+    return value if value in ("normal", "brief") else "normal"
+
+
+def load_speech_echo():
+    """Whether typed characters are spoken back."""
+    try:
+        return bool(load_config().get("speech_echo", True))
+    except Exception:
+        return True
+
+
+def apply_saved_speech_settings():
+    """Set directly rather than through set_enabled(): that one announces the
+    change, and "speech on" as the very first thing the app says would be a
+    status report nobody asked for."""
+    a11y.enabled = load_speech_enabled()
+    a11y.verbosity = load_speech_verbosity()
+    a11y.echo_keys = load_speech_echo()
 
 
 def load_tooltips_enabled():
@@ -2068,6 +2537,29 @@ def format_duration(seconds):
     minutes = int(seconds // 60)
     secs = seconds - minutes * 60
     return f"{minutes}:{secs:04.1f}"
+
+
+def speech_duration(seconds):
+    """A length in words rather than in clock notation.
+
+    format_duration's "0:02.0" is exactly right on a label and unreadable in
+    a sentence: a screen reader pronounces it "zero colon zero two point
+    zero". Same number, said the way a person would say it.
+    """
+    if seconds is None:
+        return "unknown length"
+    seconds = float(seconds)
+    if seconds < 1:
+        return "%d milliseconds" % round(seconds * 1000)
+    if seconds < 60:
+        # One decimal below ten seconds: the difference between a 1.2 and a
+        # 1.8 second sample matters when it has to fit the pad's limit.
+        return ("%.1f seconds" % seconds) if seconds < 10 else ("%d seconds" % round(seconds))
+    minutes, remainder = divmod(int(round(seconds)), 60)
+    minute_word = "1 minute" if minutes == 1 else "%d minutes" % minutes
+    if not remainder:
+        return minute_word
+    return "%s %d seconds" % (minute_word, remainder)
 
 
 def format_size(num_bytes):
@@ -2569,6 +3061,8 @@ class FolderNavMixin:
                                     highlightcolor=ACCENT_BLUE, font=(UI_FAMILY, 9))
         self.path_entry.pack(side="left", fill="x", expand=True)
         self.path_entry.bind("<Return>", self.go_to_typed_path)
+        a11y.label(self.path_entry, name="Folder path",
+                   help="Type a folder and press Enter to go there.")
         go_btn = RoundedButton(top, text="Go", command=self.go_to_typed_path,
                                 bg=BTN_BLUE, fg="#FFFFFF", parent_bg=container_bg, width=50, height=28)
         go_btn.pack(side="left", padx=(6, 0))
@@ -2656,6 +3150,7 @@ class FolderPickerDialog(FolderNavMixin, tk.Toplevel):
         scrollbar = RoundedScrollbar(list_frame, orient="vertical", parent_bg=BG_PANEL)
         scrollbar.pack(side="right", fill="y", padx=(3, 0))
         self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set)
+        a11y.label(self.listbox, name="Folders")
         style_listbox(self.listbox)
         self.listbox.pack(side="left", fill="both", expand=True)
         add_focus_border(self.listbox, list_frame)
@@ -2775,6 +3270,7 @@ class FileSaveDialog(FolderNavMixin, tk.Toplevel):
         scrollbar.pack(side="right", fill="y", padx=(3, 0))
         self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set,
                                    font=(UI_FAMILY, 10))
+        a11y.label(self.listbox, name="Files and folders")
         style_listbox(self.listbox)
         self.listbox.pack(side="left", fill="both", expand=True)
         add_focus_border(self.listbox, list_frame)
@@ -2800,6 +3296,7 @@ class FileSaveDialog(FolderNavMixin, tk.Toplevel):
                                     highlightthickness=1, highlightbackground=BORDER_COLOR,
                                     highlightcolor=ACCENT_BLUE, font=(UI_FAMILY, 10))
         self.name_entry.pack(side="left", fill="x", expand=True, padx=6)
+        a11y.label(self.name_entry, name="File name")
         self.name_entry.bind("<Return>", lambda e: self.on_save())
 
         btn_row = tk.Frame(self, padx=10, pady=10, bg=BG_DARK)
@@ -2931,6 +3428,7 @@ class PresetSaveDialog(FolderNavMixin, tk.Toplevel):
         scrollbar = RoundedScrollbar(list_frame, orient="vertical", parent_bg=BG_PANEL)
         scrollbar.pack(side="right", fill="y", padx=(3, 0))
         self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=(UI_FAMILY, 10))
+        a11y.label(self.listbox, name="Folders")
         style_listbox(self.listbox)
         self.listbox.pack(side="left", fill="both", expand=True)
         add_focus_border(self.listbox, list_frame)
@@ -2956,6 +3454,7 @@ class PresetSaveDialog(FolderNavMixin, tk.Toplevel):
                                     highlightbackground=BORDER_COLOR, highlightcolor=ACCENT_BLUE,
                                     font=(UI_FAMILY, 10))
         self.name_entry.pack(side="left", fill="x", expand=True, padx=6)
+        a11y.label(self.name_entry, name="Preset name")
 
         banks_panel = RoundedPanel(self, title="Banks to Save", parent_bg=BG_DARK, panel_bg=BG_PANEL,
                                     border=BORDER_LIGHT, radius=14, title_fg=ACCENT_BLUE)
@@ -3172,6 +3671,7 @@ class PresetLoadDialog(FolderNavMixin, tk.Toplevel):
         scrollbar = RoundedScrollbar(list_frame, orient="vertical", parent_bg=BG_PANEL)
         scrollbar.pack(side="right", fill="y", padx=(3, 0))
         self.listbox = tk.Listbox(list_frame, yscrollcommand=scrollbar.set, font=(UI_FAMILY, 10))
+        a11y.label(self.listbox, name="Presets")
         style_listbox(self.listbox)
         self.listbox.pack(side="left", fill="both", expand=True)
         add_focus_border(self.listbox, list_frame)
@@ -3414,6 +3914,7 @@ class AudioPreviewDialog(FolderNavMixin, tk.Toplevel):
         self.listbox = ttk.Treeview(list_frame, columns=("length", "size"), show="tree headings",
                                      selectmode="browse", yscrollcommand=scrollbar.set,
                                      style="Dark.Treeview")
+        a11y.label(self.listbox, name="Audio files")
         self.listbox.heading("#0", text="Name", anchor="w", command=lambda: self._sort_by("name"))
         self.listbox.heading("length", text="Length", anchor="e", command=lambda: self._sort_by("length"))
         self.listbox.heading("size", text="Size", anchor="e", command=lambda: self._sort_by("size"))
@@ -3457,18 +3958,18 @@ class AudioPreviewDialog(FolderNavMixin, tk.Toplevel):
 
         zoom_row = tk.Frame(autoplay_row, bg=BG_PANEL)
         zoom_row.pack(side="left", padx=(16, 0))
-        zoom_out_btn = RoundedButton(zoom_row, text="\u2212", command=self.zoom_out,
+        zoom_out_btn = RoundedButton(zoom_row, text="\u2212", a11y_name="Zoom out", command=self.zoom_out,
                                       bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                       width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         zoom_out_btn.pack(side="left", padx=1)
         self.zoom_label = tk.Label(zoom_row, text="1.0x")
         style_label(self.zoom_label, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 8, "bold"))
         self.zoom_label.pack(side="left", padx=4)
-        zoom_in_btn = RoundedButton(zoom_row, text="+", command=self.zoom_in,
+        zoom_in_btn = RoundedButton(zoom_row, text="+", a11y_name="Zoom in", command=self.zoom_in,
                                      bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                      width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         zoom_in_btn.pack(side="left", padx=1)
-        zoom_reset_btn = RoundedButton(zoom_row, text="Reset", command=self.zoom_reset,
+        zoom_reset_btn = RoundedButton(zoom_row, text="Reset", a11y_name="Reset zoom", command=self.zoom_reset,
                                         bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                         width=55, height=22, font=(UI_FAMILY, 8, "bold"))
         zoom_reset_btn.pack(side="left", padx=(6, 0))
@@ -4153,6 +4654,7 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
         self.listbox = ttk.Treeview(left_list_frame, columns=("length", "size"), show="tree headings",
                                      selectmode="extended", yscrollcommand=left_scrollbar.set,
                                      style="Dark.Treeview")
+        a11y.label(self.listbox, name="Available files")
         self.listbox.heading("#0", text="Name", anchor="w", command=lambda: self._sort_by("name"))
         self.listbox.heading("length", text="Length", anchor="e", command=lambda: self._sort_by("length"))
         self.listbox.heading("size", text="Size", anchor="e", command=lambda: self._sort_by("size"))
@@ -4170,20 +4672,21 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
         # --- MIDDLE: transfer column ---
         mid = tk.Frame(panes, bg=BG_DARK)
         mid.grid(row=0, column=1, padx=4)     # no sticky: centred on the lists
-        for txt, cmd, tip in (
-                ("\u2192", self.add_selected,
+        for txt, name, cmd, tip in (
+                ("\u2192", "Add to chop order", self.add_selected,
                  "Adds the sample(s) highlighted on the left to the chop order.\n"
                  "With trim markers set, only the marked region is added - so you "
                  "can pull several regions out of one long file."),
-                ("\u2190", self.remove_from_selection,
+                ("\u2190", "Remove from chop order", self.remove_from_selection,
                  "Takes the highlighted entries back out of the chop order. The "
                  "files themselves are untouched.\nShortcut: Del or Backspace"),
-                ("\u25b2", self.move_up,
+                ("\u25b2", "Move one slice earlier", self.move_up,
                  "Moves the highlighted entry one slice earlier. The order in the "
                  "right-hand list is the slice order on the P-6.\nShortcut: Alt+Up"),
-                ("\u25bc", self.move_down,
+                ("\u25bc", "Move one slice later", self.move_down,
                  "Moves the highlighted entry one slice later.\nShortcut: Alt+Down")):
-            b = RoundedButton(mid, text=txt, command=cmd, bg=BG_INPUT, fg=FG_TEXT,
+            b = RoundedButton(mid, text=txt, a11y_name=name, command=cmd,
+                              bg=BG_INPUT, fg=FG_TEXT,
                               parent_bg=BG_DARK, width=40, height=26,
                               font=(UI_FAMILY, 10, "bold"))
             b.pack(pady=3)
@@ -4220,6 +4723,7 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
         self.selected_listbox = ttk.Treeview(right_list_frame, columns=("no", "name", "length", "size"),
                                               show="headings", selectmode="extended",
                                               yscrollcommand=right_scrollbar.set, style="Dark.Treeview")
+        a11y.label(self.selected_listbox, name="Chop order")
         self.selected_listbox.heading("no", text="No.", anchor="w")
         self.selected_listbox.heading("name", text="Name", anchor="w")
         self.selected_listbox.heading("length", text="Length", anchor="e")
@@ -4264,18 +4768,18 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
 
         zoom_row = tk.Frame(wave_header, bg=BG_PANEL)
         zoom_row.pack(side="left", padx=(16, 0))
-        zoom_out_btn = RoundedButton(zoom_row, text="\u2212", command=self.zoom_out,
+        zoom_out_btn = RoundedButton(zoom_row, text="\u2212", a11y_name="Zoom out", command=self.zoom_out,
                                       bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                       width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         zoom_out_btn.pack(side="left", padx=1)
         self.zoom_label = tk.Label(zoom_row, text="1.0x")
         style_label(self.zoom_label, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 8, "bold"))
         self.zoom_label.pack(side="left", padx=4)
-        zoom_in_btn = RoundedButton(zoom_row, text="+", command=self.zoom_in,
+        zoom_in_btn = RoundedButton(zoom_row, text="+", a11y_name="Zoom in", command=self.zoom_in,
                                      bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                      width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         zoom_in_btn.pack(side="left", padx=1)
-        zoom_reset_btn = RoundedButton(zoom_row, text="Reset", command=self.zoom_reset,
+        zoom_reset_btn = RoundedButton(zoom_row, text="Reset", a11y_name="Reset zoom", command=self.zoom_reset,
                                         bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                         width=55, height=22, font=(UI_FAMILY, 8, "bold"))
         zoom_reset_btn.pack(side="left", padx=(6, 0))
@@ -4333,9 +4837,12 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
         style_label(lbl1)
         lbl1.grid(row=0, column=0, sticky="w")
         self.slices_var = tk.IntVar(value=load_default_slices())
+        # The label to the left of each of these names it on screen; say so,
+        # or the announcement is a bare number with no idea what it counts.
         om1 = RoundedDropdown(opts, self.slices_var, SLICE_COUNTS, parent_bg=BG_DARK, width=70,
                                command=lambda _v: self.on_options_changed())
         om1.grid(row=0, column=1, padx=6)
+        a11y.label(om1, name="Number of slices")
         add_tooltip(om1,
                     "How many equal slices the multisample is divided into. Each selected "
                     "sample fills one slice; unused slices stay silent. Fewer slices = "
@@ -4348,6 +4855,7 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
         om2 = RoundedDropdown(opts, self.rate_var, TARGET_RATES, parent_bg=BG_DARK, width=90,
                                command=lambda _v: self.on_options_changed())
         om2.grid(row=0, column=3, padx=6)
+        a11y.label(om2, name="Sample rate", value=lambda: "%s hertz" % self.rate_var.get())
         add_tooltip(om2,
                     "Sample rate of the finished multisample. A lower rate means less "
                     "memory and a longer possible slice time, at the cost of high "
@@ -4372,6 +4880,7 @@ class ChopDialog(FolderNavMixin, tk.Toplevel):
                                    parent_bg=BG_DARK, width=110,
                                    command=lambda _v: self._on_normalize_mode_changed())
         norm_dd.grid(row=0, column=6, padx=6)
+        a11y.label(norm_dd, name="Normalize")
         add_tooltip(norm_dd,
                     "Off: levels stay as they are.\n"
                     "Per sample: every slice is lifted to full level on its own - use "
@@ -5511,18 +6020,18 @@ class PadWaveformViewDialog(tk.Toplevel):
         # on that side regardless of how wide the left-hand group grows.
         zoom_row = tk.Frame(controls_row, bg=BG_PANEL)
         zoom_row.pack(side="right")
-        zoom_out_btn = RoundedButton(zoom_row, text="\u2212", command=self.zoom_out,
+        zoom_out_btn = RoundedButton(zoom_row, text="\u2212", a11y_name="Zoom out", command=self.zoom_out,
                                       bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                       width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         zoom_out_btn.pack(side="left", padx=1)
         self.zoom_label = tk.Label(zoom_row, text="1.0x")
         style_label(self.zoom_label, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 8, "bold"))
         self.zoom_label.pack(side="left", padx=4)
-        zoom_in_btn = RoundedButton(zoom_row, text="+", command=self.zoom_in,
+        zoom_in_btn = RoundedButton(zoom_row, text="+", a11y_name="Zoom in", command=self.zoom_in,
                                      bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                      width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         zoom_in_btn.pack(side="left", padx=1)
-        zoom_reset_btn = RoundedButton(zoom_row, text="Reset", command=self.zoom_reset,
+        zoom_reset_btn = RoundedButton(zoom_row, text="Reset", a11y_name="Reset zoom", command=self.zoom_reset,
                                         bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                         width=55, height=22, font=(UI_FAMILY, 8, "bold"))
         zoom_reset_btn.pack(side="left", padx=(6, 0))
@@ -5541,14 +6050,14 @@ class PadWaveformViewDialog(tk.Toplevel):
         fade_in_lbl = tk.Label(controls_row, text="Fade In:")
         style_label(fade_in_lbl, font=(UI_FAMILY, 9))
         fade_in_lbl.pack(side="left", padx=(20, 0))
-        self.fade_in_minus = RoundedButton(controls_row, text="\u2212", command=lambda: self._adjust_fade("in", -1),
+        self.fade_in_minus = RoundedButton(controls_row, text="\u2212", a11y_name="Shorten fade in", command=lambda: self._adjust_fade("in", -1),
                                             bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                             width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         self.fade_in_minus.pack(side="left", padx=(6, 1))
         self.fade_in_label = tk.Label(controls_row, text="0.00s", width=6)
         style_label(self.fade_in_label, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 8, "bold"))
         self.fade_in_label.pack(side="left", padx=4)
-        self.fade_in_plus = RoundedButton(controls_row, text="+", command=lambda: self._adjust_fade("in", 1),
+        self.fade_in_plus = RoundedButton(controls_row, text="+", a11y_name="Lengthen fade in", command=lambda: self._adjust_fade("in", 1),
                                            bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                            width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         self.fade_in_plus.pack(side="left", padx=1)
@@ -5556,14 +6065,14 @@ class PadWaveformViewDialog(tk.Toplevel):
         fade_out_lbl = tk.Label(controls_row, text="Fade Out:")
         style_label(fade_out_lbl, font=(UI_FAMILY, 9))
         fade_out_lbl.pack(side="left", padx=(20, 0))
-        self.fade_out_minus = RoundedButton(controls_row, text="\u2212", command=lambda: self._adjust_fade("out", -1),
+        self.fade_out_minus = RoundedButton(controls_row, text="\u2212", a11y_name="Shorten fade out", command=lambda: self._adjust_fade("out", -1),
                                              bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                              width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         self.fade_out_minus.pack(side="left", padx=(6, 1))
         self.fade_out_label = tk.Label(controls_row, text="0.00s", width=6)
         style_label(self.fade_out_label, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 8, "bold"))
         self.fade_out_label.pack(side="left", padx=4)
-        self.fade_out_plus = RoundedButton(controls_row, text="+", command=lambda: self._adjust_fade("out", 1),
+        self.fade_out_plus = RoundedButton(controls_row, text="+", a11y_name="Lengthen fade out", command=lambda: self._adjust_fade("out", 1),
                                             bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                             width=28, height=22, font=(UI_FAMILY, 10, "bold"))
         self.fade_out_plus.pack(side="left", padx=1)
@@ -6474,6 +6983,9 @@ class AboutDialog(tk.Toplevel):
         link_label.insert(0, APP_URL)
         link_label.config(state="readonly")  # selectable and copyable, but not editable
         link_label.pack(fill="x", pady=(0, 12))
+        # Read-only, but still a keyboard stop, because the whole point of
+        # an Entry here is that the address can be selected and copied.
+        a11y.label(link_label, name="Project web address")
         add_tooltip(link_label,
                     "Project page with the latest version, source code and issue "
                     "tracker. Select the text to copy it, or use \u201cCopy Info\u201d "
@@ -6494,6 +7006,8 @@ class AboutDialog(tk.Toplevel):
             insertwidth=0, cursor="xterm",
             selectbackground=ACCENT_BLUE, selectforeground="#FFFFFF")
         self.info_text.pack(fill="both", expand=True, pady=(6, 4))
+        a11y.label(self.info_text, name="Version and system information",
+                   value=lambda: about_info_as_text())
         self.info_text.tag_configure("key", foreground=FG_MUTED)
         for label, value in collect_about_info():
             self.info_text.insert("end", f"{label}: ", "key")
@@ -6639,6 +7153,7 @@ class SettingsDialog(tk.Toplevel):
                                     ["dark", "tokyo", "dracula", "modern", "latte", "bright"],
                                     parent_bg=BG_PANEL, width=100, height=26)
         theme_dd.pack(side="left", padx=6)
+        a11y.label(theme_dd, name="Colour theme")
         theme_names_hint = tk.Label(
             theme_row,
             text="(latte = muted Catppuccin Latte, bright = the original)",
@@ -6668,6 +7183,64 @@ class SettingsDialog(tk.Toplevel):
                     "Short explanations that appear when you hover over a button or "
                     "waveform. Turn this off once you know your way around.")
 
+        # ----- Accessibility -----
+        a11y_panel = RoundedPanel(outer, title="Speech and Keyboard", parent_bg=BG_DARK,
+                                   panel_bg=BG_PANEL, border=BORDER_LIGHT, radius=14,
+                                   title_fg=ACCENT_BLUE)
+        a11y_panel.pack(fill="x", pady=(0, 12))
+
+        backend_row = tk.Frame(a11y_panel.body, bg=BG_PANEL)
+        backend_row.pack(fill="x", pady=(0, 8))
+        backend_lbl = tk.Label(
+            backend_row, anchor="w",
+            text="Speech output: %s" % (a11y.backend_name() if a11y.speech_available
+                                        else "none found"))
+        style_label(backend_lbl, bg=BG_PANEL,
+                    fg=(FG_TEXT if a11y.speech_available else ACCENT_ORANGE),
+                    font=(UI_FAMILY, 9))
+        backend_lbl.pack(side="left")
+
+        speech_row = tk.Frame(a11y_panel.body, bg=BG_PANEL)
+        speech_row.pack(fill="x")
+        self.speech_var = tk.BooleanVar(value=a11y.enabled)
+        speech_cb = tk.Checkbutton(speech_row, text="Speak the focused control",
+                                    variable=self.speech_var,
+                                    command=self._on_speech_toggled)
+        style_checkbutton(speech_cb)
+        speech_cb.config(bg=BG_PANEL, activebackground=BG_PANEL)
+        speech_cb.pack(side="left")
+        add_tooltip(speech_cb,
+                    "Announces whatever the keyboard lands on through NVDA, JAWS or "
+                    "the system voice. Tk windows are invisible to a screen reader on "
+                    "their own, so this is what makes the app readable. "
+                    "Shortcut: Ctrl+Shift+S.")
+
+        self.speech_help_var = tk.BooleanVar(value=(a11y.verbosity == "normal"))
+        speech_help_cb = tk.Checkbutton(speech_row, text="Include the hover help",
+                                         variable=self.speech_help_var)
+        style_checkbutton(speech_help_cb)
+        speech_help_cb.config(bg=BG_PANEL, activebackground=BG_PANEL)
+        speech_help_cb.pack(side="left", padx=(16, 0))
+        add_tooltip(speech_help_cb,
+                    "Reads the first sentence or two of a control's tooltip after its "
+                    "name. Helpful while learning the app, chatty once you know it.")
+
+        self.speech_echo_var = tk.BooleanVar(value=a11y.echo_keys)
+        speech_echo_cb = tk.Checkbutton(speech_row, text="Echo typed characters",
+                                         variable=self.speech_echo_var)
+        style_checkbutton(speech_echo_cb)
+        speech_echo_cb.config(bg=BG_PANEL, activebackground=BG_PANEL)
+        speech_echo_cb.pack(side="left", padx=(16, 0))
+        add_tooltip(speech_echo_cb,
+                    "Speaks each character as you type it into a field. A screen reader "
+                    "cannot do this for a Tk text field, so the app does it instead.")
+
+        keys_btn = RoundedButton(a11y_panel.body, text="Keyboard shortcuts...",
+                                  command=self._show_shortcuts,
+                                  bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL, width=160)
+        keys_btn.pack(anchor="w", pady=(10, 0))
+        add_tooltip(keys_btn, "The full list, also on F1 from anywhere in the app.")
+
         # ----- Audio components -----
         comp_panel = RoundedPanel(outer, title="Audio Components (pydub / ffmpeg)", parent_bg=BG_DARK,
                                    panel_bg=BG_PANEL, border=BORDER_LIGHT, radius=14,
@@ -6691,6 +7264,7 @@ class SettingsDialog(tk.Toplevel):
         current_ffmpeg = load_ffmpeg_override() or getattr(AudioSegment, "converter", "") if PYDUB_AVAILABLE else ""
         self.ffmpeg_entry.insert(0, current_ffmpeg or "")
         self.ffmpeg_entry.pack(side="left", fill="x", expand=True, padx=6)
+        a11y.label(self.ffmpeg_entry, name="ffmpeg path")
 
         ffprobe_row = tk.Frame(comp_panel.body, bg=BG_PANEL)
         ffprobe_row.pack(fill="x", pady=(6, 0))
@@ -6703,6 +7277,7 @@ class SettingsDialog(tk.Toplevel):
         current_ffprobe = load_ffprobe_override() or getattr(AudioSegment, "ffprobe", "") if PYDUB_AVAILABLE else ""
         self.ffprobe_entry.insert(0, current_ffprobe or "")
         self.ffprobe_entry.pack(side="left", fill="x", expand=True, padx=6)
+        a11y.label(self.ffprobe_entry, name="ffprobe path")
 
         hint = tk.Label(comp_panel.body,
                          text="Leave blank for automatic detection. Only fill in if ffmpeg/ffprobe "
@@ -6743,6 +7318,7 @@ class SettingsDialog(tk.Toplevel):
         slices_dd = RoundedDropdown(slices_row, self.default_slices_var, SLICE_COUNTS,
                                      parent_bg=BG_PANEL, width=70, height=26)
         slices_dd.pack(side="left", padx=6)
+        a11y.label(slices_dd, name="Default number of slices")
 
         storage_row = tk.Frame(defaults_panel.body, bg=BG_PANEL)
         storage_row.pack(fill="x", pady=(8, 0))
@@ -6755,6 +7331,7 @@ class SettingsDialog(tk.Toplevel):
                                           highlightcolor=ACCENT_BLUE, font=(UI_FAMILY, 9), justify="center")
         self.storage_mb_entry.insert(0, str(load_storage_warning_mb()))
         self.storage_mb_entry.pack(side="left", padx=6)
+        a11y.label(self.storage_mb_entry, name="Storage warning threshold in megabytes")
         add_tooltip(self.storage_mb_entry,
                     "Above this size the storage display turns red (for the current bank "
                     "and for the total), and copying to the P-6 asks for confirmation "
@@ -6891,6 +7468,15 @@ class SettingsDialog(tk.Toplevel):
         self.lift()
         self.focus_force()
 
+    def _on_speech_toggled(self):
+        """Applied immediately, not on Save: a user who cannot hear the
+        dialog needs the toggle to take effect while they are still in it."""
+        a11y.set_enabled(bool(self.speech_var.get()))
+        save_config_value("speech_enabled", bool(self.speech_var.get()))
+
+    def _show_shortcuts(self):
+        self.app.show_keyboard_help()
+
     def _save(self):
         global FFMPEG_AVAILABLE
 
@@ -6903,6 +7489,14 @@ class SettingsDialog(tk.Toplevel):
         # explicit Save is never a no-op for a setting shown in this dialog)
         set_tooltips_enabled(bool(self.tooltips_var.get()))
         save_config_value("tooltips_enabled", bool(self.tooltips_var.get()))
+
+        # Speech and keyboard
+        a11y.set_enabled(bool(self.speech_var.get()))
+        a11y.verbosity = "normal" if self.speech_help_var.get() else "brief"
+        a11y.echo_keys = bool(self.speech_echo_var.get())
+        save_config_value("speech_enabled", bool(self.speech_var.get()))
+        save_config_value("speech_verbosity", a11y.verbosity)
+        save_config_value("speech_echo", a11y.echo_keys)
 
         # Defaults
         save_config_value("default_autoplay", bool(self.default_autoplay_var.get()))
@@ -7712,7 +8306,13 @@ class RoundedScrollbar(tk.Canvas):
         # 1 px costs nothing.
         kw = ({"width": self.THICKNESS, "height": 1} if orient == "vertical"
               else {"height": self.THICKNESS, "width": 1})
-        super().__init__(parent, bg=parent_bg, highlightthickness=0, bd=0, **kw)
+        super().__init__(parent, bg=parent_bg, highlightthickness=0, bd=0,
+                         takefocus=0, **kw)
+        # Skipped by the keyboard on purpose: a scrollbar is a mouse
+        # affordance for content that is itself reachable and scrollable
+        # with the keyboard, so stopping on the bar would add a step that
+        # buys nothing.
+        a11y.skip(self)
         self._first, self._last = 0.0, 1.0
         self._visible = True
         # With auto_hide off, set() only ever redraws. Callers that place the
@@ -7881,6 +8481,7 @@ class WaveformCreatorDialog(tk.Toplevel):
                                     highlightbackground=BORDER_COLOR,
                                     highlightcolor=ACCENT_BLUE, font=(UI_FAMILY, 10))
         self.name_entry.pack(side="left", padx=(6, 18))
+        a11y.label(self.name_entry, name="Shape name")
         for lane in ("A", "B"):
             rb = tk.Radiobutton(head, text=f"Shape {lane}", variable=self.active,
                                  value=lane, command=self._redraw)
@@ -8321,6 +8922,7 @@ class SynthDialog(tk.Toplevel):
         box.rowconfigure(0, weight=1)
         box.columnconfigure(0, weight=1)
         lb = tk.Listbox(box, selectmode="extended", exportselection=False, height=13)
+        a11y.label(lb, name="Waveform families")
         style_listbox(lb)
         lb.grid(row=0, column=0, sticky="nsew")
         vs = RoundedScrollbar(box, orient="vertical", command=lb.yview,
@@ -8385,6 +8987,7 @@ class SynthDialog(tk.Toplevel):
                              parent_bg=BG_PANEL, width=90, height=26,
                              font=(UI_FAMILY, 9))
         dd.pack(side="left", padx=(6, 18))
+        a11y.label(dd, name="Register")
         add_tooltip(dd,
                     "Bass keeps the full harmonic content and is meant to be played at "
                     "the root note or below. Mid and Lead are band limited so they stay "
@@ -9299,14 +9902,23 @@ class SampleSlot:
         self.panel = RoundedPanel(parent, title=f"PAD_{pad_num}",
                                    parent_bg=parent.cget("bg"), panel_bg=BG_PANEL,
                                    border=BORDER_LIGHT, radius=14, title_fg=ACCENT_BLUE)
+        # Every pad holds the same six controls, so the control names alone
+        # cannot say which pad is about to be loaded or cleared. Naming the
+        # panel makes the first stop inside it announce the pad, once.
+        a11y.group(self.panel, lambda: "Pad %d, %s" % (
+            self.pad_num, self.display_name or "empty"))
         self.panel.grid(row=(pad_num - 1) // 3, column=(pad_num - 1) % 3,
                          padx=6, pady=6, sticky="nsew")
         self.frame = self.panel.body
 
+        # Skipped: the pad's group announcement already carries the sample
+        # name, and this label is not focusable anyway - marking it keeps a
+        # stray click-to-focus from repeating what was just said.
         self.label = tk.Label(self.frame, text="No sample loaded", width=30,
                                anchor="w")
         style_label(self.label, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 9))
         self.label.pack(fill="x")
+        a11y.skip(self.label)
         self._bind_internal_drag(self.label)
         self._bind_internal_drag(self.panel.canvas)
         drag_help = ("Drag this name onto another pad to swap the two pads (including "
@@ -9328,6 +9940,16 @@ class SampleSlot:
         self.mini_wave_canvas.pack(fill="x", pady=(2, 4))
         self.mini_wave_canvas.bind("<Configure>", self._redraw_mini_waveform_at_current_width)
         self.mini_wave_canvas.bind("<Button-1>", self.open_waveform_view)
+        # Clicking this opens the sample editor, so it is a control, not
+        # decoration - it needs a name, a place in the Tab order and a key.
+        self.mini_wave_canvas.configure(takefocus=1, highlightthickness=2,
+                                        highlightbackground=WAVE_BG,
+                                        highlightcolor=FOCUS_RING)
+        a11y.label(self.mini_wave_canvas, name="Sample editor", role="button",
+                   value=lambda: self.accessible_summary(with_pad_number=False))
+        for _sequence in ("<Return>", "<KP_Enter>", "<space>"):
+            self.mini_wave_canvas.bind(
+                _sequence, lambda e: self._open_editor_from_keyboard())
         add_tooltip(self.mini_wave_canvas,
                     "Click the waveform to open the editor for this sample: trim markers, "
                     "zoom, normalize and fade in/out, then \"Apply to Pad\". "
@@ -9345,6 +9967,8 @@ class SampleSlot:
                        command=self.on_rate_changed,
                        parent_bg=BG_PANEL, width=90, height=26, font=(UI_FAMILY, 9))
         rate_menu.pack(side="left", padx=4)
+        a11y.label(rate_menu, name="Sample rate", value=lambda: "%d hertz" % self.target_rate.get())
+        self.rate_menu = rate_menu
 
         self.mono_var = tk.BooleanVar(value=False)
         self.mono_cb = tk.Checkbutton(rate_row, text="Mono", variable=self.mono_var,
@@ -9359,7 +9983,7 @@ class SampleSlot:
         pitch_lbl = tk.Label(pitch_row, text="Pitch:")
         style_label(pitch_lbl, bg=BG_PANEL, font=(UI_FAMILY, 9))
         pitch_lbl.pack(side="left")
-        pitch_minus_btn = RoundedButton(pitch_row, text="\u2212", command=self.pitch_step_down,
+        pitch_minus_btn = RoundedButton(pitch_row, text="\u2212", a11y_name="Pitch down", command=self.pitch_step_down,
                                          bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                          width=24, height=24, font=(UI_FAMILY, 9, "bold"))
         pitch_minus_btn.pack(side="left", padx=(4, 2))
@@ -9371,14 +9995,19 @@ class SampleSlot:
         self.pitch_entry.pack(side="left")
         self.pitch_entry.bind("<Return>", self.on_pitch_entry_commit)
         self.pitch_entry.bind("<FocusOut>", self.on_pitch_entry_commit)
-        pitch_plus_btn = RoundedButton(pitch_row, text="+", command=self.pitch_step_up,
+        a11y.label(self.pitch_entry, name="Pitch in cents")
+        # Up/Down on the field itself, so pitch can be nudged without
+        # tabbing out to the +/- buttons and back.
+        self.pitch_entry.bind("<Up>", lambda e: self._pitch_key(1))
+        self.pitch_entry.bind("<Down>", lambda e: self._pitch_key(-1))
+        pitch_plus_btn = RoundedButton(pitch_row, text="+", a11y_name="Pitch up", command=self.pitch_step_up,
                                         bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                         width=24, height=24, font=(UI_FAMILY, 9, "bold"))
         pitch_plus_btn.pack(side="left", padx=(2, 4))
         cents_lbl = tk.Label(pitch_row, text="cents")
         style_label(cents_lbl, bg=BG_PANEL, fg=FG_MUTED, font=(UI_FAMILY, 8))
         cents_lbl.pack(side="left")
-        pitch_reset_btn = RoundedButton(pitch_row, text="Reset", command=self.pitch_reset,
+        pitch_reset_btn = RoundedButton(pitch_row, text="Reset", a11y_name="Reset pitch", command=self.pitch_reset,
                                          bg=BG_INPUT, fg=FG_TEXT, parent_bg=BG_PANEL,
                                          width=55, height=24, font=(UI_FAMILY, 8, "bold"))
         pitch_reset_btn.pack(side="left", padx=(6, 0))
@@ -9395,6 +10024,7 @@ class SampleSlot:
             command=self.on_wt_patch_changed, parent_bg=BG_PANEL,
             width=92, height=26, font=(UI_FAMILY, 9))
         self.wt_patch_menu.pack(side="left", padx=4)
+        a11y.label(self.wt_patch_menu, name="Init patch")
         add_tooltip(self.wt_patch_menu,
                     "Filter and envelope settings written into this pad's .PRM file. "
                     "Init is the plain looping voice; the others were captured dry from "
@@ -9463,6 +10093,41 @@ class SampleSlot:
     # ---------------------------------------------------------------
     # Wavetable synth
     # ---------------------------------------------------------------
+
+    def accessible_summary(self, with_pad_number=True):
+        """One spoken line describing this pad.
+
+        Deliberately the same wording everywhere it is used - the group
+        announcement on Tab, the Alt+1..6 jump, and the F3 overview - so the
+        pad sounds like the same thing however you arrived at it.
+        """
+        prefix = "Pad %d" % self.pad_num if with_pad_number else ""
+        if self.wavetable:
+            families = self.wavetable.get("families") or []
+            detail = "wavetable, %s" % (", ".join(str(f) for f in families) or "custom")
+            detail += ", init patch %s" % self.wt_patch.get()
+            if self.wt_poly.get():
+                detail += ", poly"
+            return ", ".join(p for p in (prefix, detail) if p)
+        if not self.filepath:
+            return ", ".join(p for p in (prefix, "empty") if p)
+
+        bits = [self.display_name or os.path.basename(self.filepath)]
+        try:
+            duration = get_audio_duration_seconds(self.filepath)
+        except Exception:
+            duration = None
+        if duration:
+            bits.append(speech_duration(duration))
+        bits.append("%d hertz" % self.target_rate.get())
+        cents = self.pitch_cents.get()
+        bits.append("pitch %+d cents" % cents if cents else "pitch normal")
+        if self.effective_mono():
+            bits.append("mono")
+        return ", ".join(p for p in ([prefix] + bits) if p)
+
+    def speak_summary(self):
+        a11y.speak(self.accessible_summary(), dedupe=False)
 
     def _bank_letter(self):
         try:
@@ -9669,6 +10334,13 @@ class SampleSlot:
                           font=(UI_FAMILY, size))
             y += size + 6
 
+    def _pitch_key(self, direction):
+        """Arrow keys on the pitch field. Same step the +/- buttons use, so
+        the two never disagree about what one press is worth."""
+        (self.pitch_step_up if direction > 0 else self.pitch_step_down)()
+        a11y.speak("%d cents" % self.pitch_cents.get(), dedupe=False)
+        return "break"
+
     def _set_pitch(self, value):
         value = max(PITCH_MIN_CENTS, min(PITCH_MAX_CENTS, int(value)))
         self.pitch_cents.set(value)
@@ -9762,6 +10434,11 @@ class SampleSlot:
         self.update_warning()
         if hasattr(self.app, "update_storage_display"):
             self.app.update_storage_display()
+        # A sample can arrive on a pad from a drop, an import, a chop or a
+        # preset - none of which the keyboard is anywhere near - so the pad
+        # says what it now holds instead of changing in silence.
+        if not from_sync:
+            a11y.announce("Loaded on %s" % self.accessible_summary())
 
     def update_warning(self):
         self.update_mini_waveform()
@@ -9845,6 +10522,7 @@ class SampleSlot:
         self.wt_poly.set(False)
         self._sync_wavetable_ui()   # ends in _sync_pad_buttons()
         self.update_mono_lock()
+        a11y.announce("Pad %d cleared" % self.pad_num)
 
     def _bind_internal_drag(self, widget):
         """Wires up the drag-to-swap gesture on a passive (non-interactive)
@@ -10074,6 +10752,14 @@ class SampleSlot:
         if hasattr(self.app, "highlight_playing_pad"):
             self.app.highlight_playing_pad(self.pad_num)
 
+    def _open_editor_from_keyboard(self):
+        if not self.filepath:
+            a11y.speak("Pad %d is empty, nothing to edit" % self.pad_num)
+            return "break"
+        a11y.note_keyboard_activation()
+        self.open_waveform_view()
+        return "break"
+
     def open_waveform_view(self, event=None):
         if self.wavetable:
             # No trim/fade editor for a wavetable - that raster is the whole
@@ -10101,7 +10787,11 @@ class SampleSlot:
 
     def set_play_button_state(self, is_playing):
         """Shows a grey Stop square in place of the green Play triangle
-        while this pad is the one currently playing."""
+        while this pad is the one currently playing.
+
+        The glyph swap is also what the button is called out loud - see
+        GLYPH_NAMES - so the announcement follows the state for free.
+        """
         if is_playing:
             self.play_btn.bg_color = BG_INPUT
             self.play_btn.text = "\u25a0"
@@ -10325,6 +11015,12 @@ class P6ManagerApp:
                                     value_color_fn=self._bank_dropdown_color,
                                     entry_builder=self._build_bank_menu_entry)
         bank_menu.pack(side="left", padx=8)
+        self.bank_menu = bank_menu
+        a11y.label(bank_menu, name="Bank",
+                   value=lambda: "%s, %s" % (
+                       self.current_bank.get(),
+                       "has samples" if self.bank_has_samples(self.current_bank.get())
+                       else "empty"))
         add_tooltip(bank_menu,
                     "Switches the 6 pads below to another bank (A-H). Each bank keeps its "
                     "own pads and settings; banks that already contain samples are shown "
@@ -10347,6 +11043,7 @@ class P6ManagerApp:
                     "size on the device. Stored per bank, so other banks keep their own "
                     "setting.")
 
+        self.top_bar = top
         self.path_label = tk.Label(top, text=f"IMPORT Path: {self.import_root}")
         style_label(self.path_label, fg=FG_MUTED, font=(UI_FAMILY, 9))
         self.path_label.pack(side="left", padx=20)
@@ -10492,6 +11189,8 @@ class P6ManagerApp:
                                            highlightthickness=0)
         self.main_wave_canvas.pack(fill="x", pady=(4, 0))
         self.main_wave_canvas.bind("<Configure>", self._render_main_waveform)
+        self.main_wave_canvas.bind(
+            "<Configure>", lambda e: self._draw_wave_cursor(), add="+")
         self.main_wave_canvas.bind("<Button-1>", self._on_main_wave_click)
         add_tooltip(self.main_wave_canvas,
                     "Click to play from that point. On a wavetable the click jumps "
@@ -10508,6 +11207,7 @@ class P6ManagerApp:
         self._main_wave_play_id = 0
 
         bottom = tk.Frame(root, padx=14, bg=BG_DARK)
+        self.bottom_bar = bottom
         bottom.pack(fill="x", side="top", pady=(0, 14))
         copy_all_btn = RoundedButton(bottom, text="Banks \u2192 P6", command=self.open_copy_banks_dialog,
                                       bg=BTN_GREEN, fg="#FFFFFF", parent_bg=BG_DARK, width=120)
@@ -10541,6 +11241,7 @@ class P6ManagerApp:
                     "folder, across all banks. Cannot be undone. Your pads in the app "
                     "stay as they are - only the device-side copies are removed.")
 
+        self._install_accessibility()
         self.build_pad_slots(self.current_bank.get())
         self.prune_orphaned_wavetables()
         _log_timing("build_pad_slots done, scheduling async import-root resolution")
@@ -10555,6 +11256,307 @@ class P6ManagerApp:
         # queues the call for whenever the loop starts), which guarantees
         # the thread only starts once mainloop is genuinely active.
         self.root.after(0, self._resolve_import_root_async)
+
+    # ------------------------------------------------------------------
+    # Accessibility
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _a11y_key(fn):
+        """Runs a global shortcut and swallows the keystroke.
+
+        The "break" is not optional: these are bound with bind_all, so
+        without it Tk delivers the key to the focused control as well and F2
+        would announce the bank *and* do whatever the control under the
+        keyboard makes of an F2.
+        """
+        try:
+            fn()
+        except Exception as exc:
+            a11y.speak("That shortcut failed: %s" % exc)
+        return "break"
+
+    def _install_accessibility(self):
+        """Everything that only makes sense once the whole main window is up.
+
+        Called from __init__ after the widgets exist but before the pads are
+        filled, so the first announcement a user hears is already correct.
+        """
+        a11y.app = self
+        a11y.clear_regions()
+        # F6 order follows the window top to bottom, which is also the order
+        # a task runs in: pick a bank, set up pads, check the size, listen,
+        # then write to the device.
+        a11y.add_region("Toolbar", self.top_bar)
+        a11y.add_region("Pads", self.pad_container)
+        a11y.add_region("Storage and warnings", lambda: self.storage_panel.body)
+        a11y.add_region("Playback waveform", self.main_wave_canvas)
+        a11y.add_region("Device actions", self.bottom_bar)
+
+        a11y.label(self.force_mono_cb, name="Force mono for this bank")
+        # Read-outs, not controls: their values are announced by the
+        # shortcuts that ask for them, so focus should not stop here.
+        for widget in (self.path_label, self.status_label, self.bank_size_label,
+                       self.total_size_label, self.main_wave_name_label,
+                       self.main_wave_duration_label):
+            a11y.skip(widget)
+
+        # The warnings box is read-only but has to be reachable: it is where
+        # "sample too long for 44100 Hz" ends up, and a warning nobody can
+        # get to is not a warning. Tk skips a disabled Text in Tab traversal,
+        # so it needs to opt in explicitly.
+        self.warnings_text.config(takefocus=1)
+        a11y.label(self.warnings_text, name="Warnings", role="text area",
+                   value=self._warnings_speech)
+
+        self._install_waveform_accessibility()
+
+        root = self.root
+        root.bind_all("<F1>", lambda e: self._a11y_key(self.show_keyboard_help))
+        root.bind_all("<F2>", lambda e: self._a11y_key(self.speak_bank_summary))
+        root.bind_all("<F3>", lambda e: self._a11y_key(self.speak_pad_overview))
+        root.bind_all("<F8>", lambda e: self._a11y_key(self.speak_warnings))
+        root.bind_all("<Control-b>", lambda e: self._a11y_key(self.focus_bank_selector))
+        # Alt+1..6 jumps straight to a pad. Six pads and a 55-stop Tab chain
+        # is exactly the case where a direct jump beats traversal.
+        for pad in PADS:
+            root.bind_all("<Alt-Key-%d>" % pad,
+                          lambda e, p=pad: self._a11y_key(lambda: self.focus_pad(p)))
+
+    # -- spoken summaries ---------------------------------------------------
+
+    def _warnings_speech(self):
+        text = " ".join((self._storage_hint_text or "").split())
+        pad_text = " ".join((self._pad_warnings_text or "").split())
+        both = ". ".join(part for part in (text, pad_text) if part)
+        return both or "no warnings"
+
+    def speak_warnings(self):
+        """F8. Warnings appear far from the keyboard focus, so there has to
+        be a way to ask for them without hunting for the box."""
+        a11y.speak("Warnings. %s" % self._warnings_speech(), dedupe=False)
+
+    def speak_bank_summary(self):
+        """F2. Bank, how full it is, and how much the whole set weighs."""
+        bank = self.current_bank.get()
+        loaded = sum(1 for pad in PADS
+                     if self.pad_widgets.get(pad) and self.pad_widgets[pad].filepath)
+        a11y.speak(
+            "Bank %s. %d of %d pads loaded. Bank %s, all banks %s. Force mono %s."
+            % (bank, loaded, len(PADS),
+               self.bank_size_label.cget("text"),
+               self.total_size_label.cget("text"),
+               "on" if self.force_mono_vars[bank].get() else "off"),
+            dedupe=False)
+
+    def speak_pad_overview(self):
+        """F3. All six pads in one go - the fastest way to answer "what is
+        actually in this bank?" without tabbing through thirty controls."""
+        lines = ["Bank %s." % self.current_bank.get()]
+        for pad in PADS:
+            slot = self.pad_widgets.get(pad)
+            lines.append(slot.accessible_summary() if slot else "Pad %d, empty" % pad)
+        a11y.speak(" ".join(lines), dedupe=False)
+
+    def focus_bank_selector(self):
+        self.bank_menu.focus_set()
+
+    def focus_pad(self, pad):
+        """Alt+1..6. Lands on the pad's first control and reads the pad out,
+        so the jump says where it arrived rather than just moving."""
+        slot = self.pad_widgets.get(pad)
+        if slot is None:
+            a11y.speak("Pad %d is not available" % pad)
+            return
+        target = first_focusable(slot.panel)
+        if target is None:
+            a11y.speak(slot.accessible_summary(), dedupe=False)
+            return
+        # Reset the remembered group so the pad name is announced again even
+        # when the keyboard was already inside a different control of it.
+        a11y._last_group = None
+        target.focus_set()
+        self.set_active_pad(pad)
+
+    # -- the waveform, without eyes ----------------------------------------
+
+    def _install_waveform_accessibility(self):
+        """Turns the playback waveform into something you can walk through.
+
+        A waveform is a picture of loudness over time. The information in it
+        that a listener actually acts on - where the sound starts, where it
+        stops, how long it runs, whether a region is silent - is all
+        readable, so the canvas becomes a control with a review cursor: move
+        it with the arrows, press Enter to play from there.
+        """
+        canvas = self.main_wave_canvas
+        self._wave_cursor_frac = 0.0
+        canvas.configure(takefocus=1, highlightthickness=2,
+                         highlightbackground=WAVE_BG, highlightcolor=FOCUS_RING)
+        a11y.label(canvas, name="Playback waveform", role="graphic",
+                   value=self.describe_main_waveform,
+                   help="Left and Right move a review cursor, Control with them "
+                        "moves in fine steps, Home and End jump to the start and "
+                        "the end, Enter plays from the cursor.")
+        canvas.bind("<Left>", lambda e: self._wave_cursor_step(-0.05))
+        canvas.bind("<Right>", lambda e: self._wave_cursor_step(0.05))
+        canvas.bind("<Control-Left>", lambda e: self._wave_cursor_step(-0.01))
+        canvas.bind("<Control-Right>", lambda e: self._wave_cursor_step(0.01))
+        canvas.bind("<Prior>", lambda e: self._wave_cursor_step(-0.25))
+        canvas.bind("<Next>", lambda e: self._wave_cursor_step(0.25))
+        canvas.bind("<Home>", lambda e: self._wave_cursor_set(0.0))
+        canvas.bind("<End>", lambda e: self._wave_cursor_set(1.0))
+        canvas.bind("<Return>", lambda e: self._wave_play_from_cursor())
+        canvas.bind("<KP_Enter>", lambda e: self._wave_play_from_cursor())
+        canvas.bind("<space>", lambda e: self._wave_play_from_cursor())
+
+    def _wave_level_at(self, frac):
+        """Peak level in a 2% window around `frac`, 0.0 to 1.0.
+
+        A window rather than a single sample: one sample of a waveform is a
+        instantaneous value that can sit at zero in the middle of the loudest
+        note in the file, which would report silence where there is none.
+        """
+        data = self.main_wave_data
+        if data is None or len(data) == 0:
+            return None
+        count = len(data)
+        centre = int(max(0.0, min(1.0, frac)) * (count - 1))
+        half = max(1, count // 100)
+        window = data[max(0, centre - half):min(count, centre + half + 1)]
+        if len(window) == 0:
+            return None
+        return float(np.max(np.abs(window)))
+
+    @staticmethod
+    def _level_word(peak):
+        """Loudness as a word plus a number. The word is what gets used at
+        speed; the number is there when a decision depends on it."""
+        if peak is None:
+            return "no audio"
+        if peak < 0.005:
+            return "silence"
+        return "%d percent" % round(peak * 100)
+
+    def describe_main_waveform(self):
+        if self.main_wave_data is None or self.main_wave_duration <= 0:
+            return "nothing loaded"
+        bits = [self.main_wave_name_label.cget("text") or "sample",
+                speech_duration(self.main_wave_duration)]
+        if self.main_wave_fs:
+            bits.append("%d hertz" % int(self.main_wave_fs))
+        bits.append("stereo" if self.main_wave_data_stereo is not None else "mono")
+        peak = float(np.max(np.abs(self.main_wave_data)))
+        bits.append("peak %s" % self._level_word(peak))
+        zones = getattr(self, "main_wave_zones", None)
+        if zones:
+            bits.append("%d wavetable zones" % len(zones["families"]))
+        bits.append("cursor at %s" % self._cursor_position_text())
+        return ", ".join(bits)
+
+    def _cursor_position_text(self):
+        seconds = self._wave_cursor_frac * self.main_wave_duration
+        return "%d percent, %s" % (round(self._wave_cursor_frac * 100),
+                                   speech_duration(seconds))
+
+    def _wave_cursor_set(self, frac, announce=True):
+        if self.main_wave_data is None:
+            a11y.speak("Nothing loaded in the waveform")
+            return "break"
+        self._wave_cursor_frac = max(0.0, min(1.0, frac))
+        self._draw_wave_cursor()
+        if announce:
+            a11y.speak("%s, %s" % (self._cursor_position_text(),
+                                   self._level_word(self._wave_level_at(self._wave_cursor_frac))),
+                       dedupe=False)
+        return "break"
+
+    def _wave_cursor_step(self, delta):
+        return self._wave_cursor_set(getattr(self, "_wave_cursor_frac", 0.0) + delta)
+
+    def _draw_wave_cursor(self):
+        """A visible line for the review cursor, so a sighted helper looking
+        over a shoulder sees the same position the speech is describing."""
+        canvas = self.main_wave_canvas
+        canvas.delete("a11ycursor")
+        if self.main_wave_data is None:
+            return
+        width = max(1, getattr(self, "main_wave_render_width", self.main_wave_width))
+        x = self._wave_cursor_frac * width
+        canvas.create_line(x, 0, x, self.main_wave_height, fill=FOCUS_RING,
+                           width=2, tags="a11ycursor")
+
+    def _wave_play_from_cursor(self):
+        pad = getattr(self, "_wave_view_pad", None)
+        slot = self.pad_widgets.get(pad) if pad else None
+        if slot is None or not slot.filepath:
+            a11y.speak("No pad is loaded into the waveform view")
+            return "break"
+        a11y.speak("Playing from %s" % self._cursor_position_text(), dedupe=False)
+        slot.play_from(self._wave_cursor_frac)
+        return "break"
+
+    # -- keyboard help -------------------------------------------------------
+
+    #: (keys, what it does). Kept as data so F1 and the README cannot drift.
+    KEYBOARD_SHORTCUTS = [
+        ("Tab / Shift+Tab", "Move between controls"),
+        ("Enter or Space", "Press the focused button, open the focused list"),
+        ("Up / Down", "Change the value of the focused selector"),
+        ("F6 / Shift+F6", "Jump to the next or previous area of the window"),
+        ("Alt+1 to Alt+6", "Jump straight to pad 1 to 6"),
+        ("Ctrl+B", "Jump to the bank selector"),
+        ("F1", "This list"),
+        ("F2", "Announce bank, pad count and storage"),
+        ("F3", "Announce what is on all six pads"),
+        ("F8", "Announce the current warnings"),
+        ("Ctrl+Z", "Undo the last pad change"),
+        ("Ctrl+Shift+Z or Ctrl+Y", "Redo"),
+        ("Ctrl+Shift+W", "Where am I: window, area and focused control"),
+        ("Ctrl+Shift+A", "Repeat the last announcement"),
+        ("Ctrl+Shift+S", "Turn speech off or back on"),
+        ("Ctrl", "Stop talking"),
+        ("Escape", "Close the current dialog"),
+        ("In the waveform: Left / Right", "Move the review cursor by 5 percent"),
+        ("In the waveform: Ctrl+Left / Right", "Move it by 1 percent"),
+        ("In the waveform: Home / End", "Jump to the start or the end"),
+        ("In the waveform: Enter", "Play from the review cursor"),
+    ]
+
+    def show_keyboard_help(self):
+        """F1. A list rather than a paragraph of text: a Listbox can be
+        arrowed through one line at a time, which is how anybody actually
+        reads a table of shortcuts."""
+        window = tk.Toplevel(self.root)
+        window.title("Keyboard shortcuts")
+        style_toplevel(window)
+        body = tk.Frame(window, bg=BG_DARK, padx=16, pady=14)
+        body.pack(fill="both", expand=True)
+
+        heading = tk.Label(body, text="Keyboard shortcuts", anchor="w")
+        style_label(heading, font=(UI_FAMILY, 12, "bold"))
+        heading.pack(fill="x", pady=(0, 8))
+        a11y.skip(heading)
+
+        listbox = tk.Listbox(body, height=min(20, len(self.KEYBOARD_SHORTCUTS)),
+                             width=62, exportselection=False, activestyle="none")
+        style_listbox(listbox)
+        for keys, what in self.KEYBOARD_SHORTCUTS:
+            listbox.insert("end", "%s  —  %s" % (keys, what))
+        listbox.pack(fill="both", expand=True)
+        listbox.selection_set(0)
+        a11y.label(listbox, name="Shortcuts")
+
+        close_btn = RoundedButton(body, text="Close", command=window.destroy,
+                                  bg=BTN_BLUE, fg="#FFFFFF", parent_bg=BG_DARK,
+                                  width=90)
+        close_btn.pack(anchor="e", pady=(10, 0))
+
+        window.transient(self.root)
+        window.update_idletasks()
+        center_toplevel_on_parent(window, self.root)
+        prepare_dialog(window, a11y, initial_focus=listbox)
+        return window
 
     def _load_logo(self):
         """Shows the logo in the bottom-right corner, floating on top of the
@@ -10650,6 +11652,9 @@ class P6ManagerApp:
         self.main_wave_source_path = source_path
         self.main_wave_zones = zones
         self.main_wave_name_label.config(text=name)
+        # A new sample invalidates wherever the review cursor was: 60% of a
+        # four second loop is not 60% of the eight second one replacing it.
+        self._wave_cursor_frac = 0.0
         if zones:
             count = len(zones["families"])
             # The 2x audition stretch is deliberately not mentioned here: the
@@ -10941,7 +11946,7 @@ class P6ManagerApp:
         # the menu stuck open with no way to dismiss it without picking an
         # item. Escape is bound explicitly too, as a guaranteed fallback.
         menu.bind("<Escape>", lambda e: menu.unpost())
-        menu.tk_popup(x, y)
+        show_popup_menu(menu, self.preset_btn, x, y, title="Preset")
 
     def open_save_preset_dialog(self):
         initial_dir = os.path.dirname(load_recent_presets()[0]) if load_recent_presets() \
@@ -10972,6 +11977,10 @@ class P6ManagerApp:
             self.root.after_cancel(self._status_clear_job)
             self._status_clear_job = None
         self.status_label.config(text=message, fg=FG_MUTED)
+        # Progress steps do not interrupt: during a bank export they arrive
+        # faster than they can be read, and cutting each one off mid-word
+        # would leave nothing intelligible.
+        a11y.announce(message)
         self.root.update_idletasks()
 
     def show_status(self, message, kind="success", duration_ms=5000):
@@ -10986,6 +11995,10 @@ class P6ManagerApp:
             "warning": ACCENT_ORANGE,
         }
         self.status_label.config(text=message, fg=colors.get(kind, FG_MUTED))
+        # The status line is the app's live region: it is where "exported 6
+        # pads" and "preset saved" appear, and it is nowhere near the
+        # keyboard focus, so it has to be spoken or it is simply invisible.
+        a11y.announce(message)
         if self._status_clear_job:
             self.root.after_cancel(self._status_clear_job)
         self._status_clear_job = self.root.after(duration_ms, self._clear_status)
@@ -12362,10 +13375,23 @@ if __name__ == "__main__":
         root = tk.Tk()
     _log_timing("tk.Tk() root window created")
     _verify_ui_font(root)
+    # Before check_startup_dependencies(): that call can already put a
+    # message dialog on screen, and an unannounced dialog with no keyboard
+    # focus is precisely the failure this layer exists to prevent.
+    a11y.install(root)
+    install_dialog_support(root, a11y)
+    apply_saved_speech_settings()
+    _log_timing("accessibility layer installed (speech backend: %s)"
+                % a11y.backend_name())
     check_startup_dependencies(root)
     _log_timing("dependency check done")
     app = P6ManagerApp(root)
     _log_timing("P6ManagerApp constructed (full UI built)")
+    # Said once the window is really there. Naming F1 up front is the whole
+    # onboarding: from there the app can explain itself.
+    root.after(400, lambda: a11y.speak(
+        "%s %s. Bank %s. Press F1 for keyboard shortcuts."
+        % (APP_NAME, APP_VERSION, app.current_bank.get()), dedupe=False))
 
     if DEBUG_STARTUP:
         def _count_widgets(w):

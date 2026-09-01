@@ -5,3 +5,15 @@ __pycache__/
 .p6_preview_tmp.wav
 *_converted.wav
 *_converted_Hz.wav
+
+# PyInstaller
+build/
+dist/
+*.spec.bak
+
+# Optional pinned ffmpeg/ffprobe for the bundled build (see PyP6.spec)
+vendor/
+
+# Frozen speech probe artefacts (see frozen_speech_probe.py)
+probe_dist/
+probe_build/

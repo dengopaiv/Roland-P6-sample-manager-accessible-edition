@@ -20,6 +20,111 @@ step through with the START knob.
 > ffmpeg/ffprobe**. No Python installation, pip packages, or separate
 > ffmpeg setup are required - just download and run. See Section 2.1.
 
+> **Accessible edition:** this fork is fully operable from the keyboard and
+> speaks through NVDA, JAWS or the system voice. Nothing needs to be turned
+> on - it announces itself on launch, and **F1** lists every shortcut. See
+> Section 0 below.
+
+---
+
+## 0. Accessibility
+
+Everything in PyP6 can be done from the keyboard alone, and the app tells you
+what it is doing out loud.
+
+### Why the app speaks for itself
+
+Tk draws its own widgets. On Windows a Tk window is a single blank rectangle
+as far as UI Automation is concerned, so NVDA, JAWS and Narrator find nothing
+inside it, no matter how the app is written. On top of that most of PyP6's
+controls are painted onto a canvas - a "button" here is an arc and a piece of
+text, not a control any screen reader could recognise.
+
+So the app is *self-voicing*: it talks to whichever screen reader is running,
+through that reader's own API, and every control has a name, a role and a
+value of its own. If no screen reader is running it falls back to the system
+voice; if speech is unavailable entirely the app still works, silently, and
+every control is still reachable by keyboard.
+
+Speech goes through the first of these that answers:
+
+| Platform | Used |
+|---|---|
+| Windows | NVDA, JAWS, System Access, Dolphin, ZDSR (via `accessible_output2`), then the NVDA controller client directly, then SAPI5 |
+| Linux | speech-dispatcher (Orca and anything else on it), or `spd-say` / `espeak` |
+| macOS | the `say` command |
+
+Check what yours resolved to under **Settings -> About -> Speech output**.
+
+### Keyboard
+
+Every control is in the Tab order, shows an amber focus ring, and is
+announced when the keyboard reaches it. Disabled controls drop out of the
+Tab order rather than becoming dead stops.
+
+| Key | Does |
+|---|---|
+| `Tab / Shift+Tab` | Move between controls |
+| `Enter or Space` | Press the focused button, open the focused list |
+| `Up / Down` | Change the value of the focused selector |
+| `F6 / Shift+F6` | Jump to the next or previous area of the window |
+| `Alt+1 to Alt+6` | Jump straight to pad 1 to 6 |
+| `Ctrl+B` | Jump to the bank selector |
+| `F1` | This list |
+| `F2` | Announce bank, pad count and storage |
+| `F3` | Announce what is on all six pads |
+| `F8` | Announce the current warnings |
+| `Ctrl+Z` | Undo the last pad change |
+| `Ctrl+Shift+Z or Ctrl+Y` | Redo |
+| `Ctrl+Shift+W` | Where am I: window, area and focused control |
+| `Ctrl+Shift+A` | Repeat the last announcement |
+| `Ctrl+Shift+S` | Turn speech off or back on |
+| `Ctrl` | Stop talking |
+| `Escape` | Close the current dialog |
+| `In the waveform: Left / Right` | Move the review cursor by 5 percent |
+| `In the waveform: Ctrl+Left / Right` | Move it by 1 percent |
+| `In the waveform: Home / End` | Jump to the start or the end |
+| `In the waveform: Enter` | Play from the review cursor |
+
+Selectors (sample rate, bank, theme, ...) behave like a Windows combo box:
+**Up/Down** step through the values and announce each one with its position
+in the list, **Home/End** jump to the ends, and **Enter** opens the full list
+- as a list you can arrow through, not as a drawn menu, so the nested
+entries like the bank selector's *Copy To* / *Move To* are reachable too.
+
+### Reading a waveform without seeing it
+
+The playback waveform at the bottom of the window is a control you can walk
+through. Focus it (Tab, or **F6** to the *Playback waveform* area) and:
+
+- **Left/Right** move a review cursor in 5% steps, **Ctrl** with them in 1%
+  steps, **Page Up/Down** in quarters, **Home/End** to the ends;
+- each move announces the position, the time, and the level there - so
+  silence, a fade and a peak are all distinguishable by ear;
+- **Enter** plays from the cursor.
+
+Each pad's small waveform is a control too: Tab to it and press **Enter** to
+open the sample editor for that pad.
+
+### Announcements you do not have to go looking for
+
+Things that happen away from the keyboard focus say so: a sample landing on a
+pad, a pad being cleared, progress during a bank export, and every message in
+the status line. Warnings (a sample too long for its rate, the storage limit)
+are announced when they change and can be re-read at any time with **F8**.
+
+### Turning it down
+
+**Settings -> Speech and Keyboard** has three switches, all remembered:
+
+- **Speak the focused control** - the whole layer, on or off (`Ctrl+Shift+S`);
+- **Include the hover help** - whether a control's tooltip is read after its
+  name. Useful while learning, chatty once you know the app;
+- **Echo typed characters** - speaking each character as you type it. A screen
+  reader cannot do this for a Tk field, so the app does.
+
+`Ctrl` on its own stops speech immediately, as it does everywhere else.
+
 ---
 
 ## What's New in 3.0.0
@@ -599,18 +704,54 @@ If you'd rather build the `.exe` yourself instead of using the prebuilt one
 (e.g. after modifying the source), you can package PyP6 with PyInstaller and
 bundle ffmpeg/ffprobe the same way the prebuilt executable does:
 
+The repository ships a build script and a PyInstaller spec that do this
+correctly, including the parts that are easy to get silently wrong:
+
+```
+powershell -ExecutionPolicy Bypass -File build_windows_exe.ps1
+```
+
+It checks the prerequisites, runs the accessibility audit and the keyboard
+tests, and only then builds `dist\PyP6-Roland-P6-Sample-Manager_3_0_0.exe` -
+one file, Python included, nothing to install on the target machine. To skip
+the checks and build directly:
+
+```
+pyinstaller --clean --noconfirm PyP6.spec
+```
+
+`PyP6.spec` picks up `ffmpeg.exe` and `ffprobe.exe` from `PATH`, or from a
+`vendor\` folder next to the spec if you want to pin a particular copy. If it
+finds neither it says so and builds anyway - the result runs, but without MP3
+support or rate/pitch/mono conversion.
+
+The equivalent one-liner, if you would rather not use the spec:
+
 ```
 pip install pyinstaller
 
 python -m PyInstaller PyP6-Roland-P6-Sample-Manager_3_0_0.py -y -w --onefile ^
-  --icon=icon.ico ^
-  --collect-data tkinterdnd2 ^
+  --icon=pyp6logo.ico ^
+  --collect-all accessible_output2 ^
+  --collect-all tkinterdnd2 ^
+  --collect-all soundfile ^
+  --hidden-import comtypes.client --hidden-import win32com.client ^
   --add-binary "C:\ffmpeg\bin\ffmpeg.exe;." ^
   --add-binary "C:\ffmpeg\bin\ffprobe.exe;." ^
   --clean
 ```
 
 Notes:
+
+- `--collect-all accessible_output2` is what keeps the build talking to
+  screen readers: that package ships the NVDA and Dolphin controller DLLs as
+  data files and loads them by path at runtime, so PyInstaller cannot see
+  them by following imports. Leave it out and the `.exe` still runs and still
+  speaks - through the system voice only, which is not what an NVDA user
+  wants to hear. **Settings -> About -> Speech output** in the built `.exe`
+  tells you which one it actually got.
+- `pyp6_accessibility.py` must sit next to the entry script; PyInstaller
+  picks it up from the import.
 
 - The logo is built into the script, so there is no `--add-data` line for
   it any more. Drop a `pyp6logo.png` next to the script if you want to use
