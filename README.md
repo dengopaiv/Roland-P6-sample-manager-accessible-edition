@@ -1,8 +1,21 @@
-# PyP6 - Roland P-6 Sample Manager
+# PyP6 - Roland P-6 Sample Manager, Accessible Edition
+
+**Everything in this app can be done from the keyboard, and it says what it
+is doing out loud** - through NVDA, JAWS or the system voice. Nothing has to
+be switched on: it announces itself on launch, and **F1** lists every
+shortcut. [Section 0](#0-accessibility) explains how it works and why a Tk
+application has to speak for itself.
+
+This is a fork of [PyP6 by Brian Siemund](https://github.com/j0kerpack/Roland-P6-sample-manager),
+tracking upstream release **4.2.3**. Everything upstream does, this does -
+the additions here are the keyboard and the speech. If you do not need
+those, use upstream; it is the same app without a layer you will not be
+using.
 
 ![Roland-P6-sample-manager](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6main.png)
 
-**Version 4.2.3** - © 2026 Brian Siemund
+**Version 4.2.3** - © 2026 Brian Siemund. Accessibility layer by
+[dengopaiv](https://github.com/dengopaiv).
 
 ## Overview
 
@@ -26,11 +39,6 @@ pad into 255 waveforms you step through with the START knob.
 If it saves you time, there is a Ko-fi link under **Settings → Donate**:
 [ko-fi.com/j0kerpack](https://ko-fi.com/j0kerpack). The app is free and
 stays free.
-
-> **Accessible edition:** this fork is fully operable from the keyboard and
-> speaks through NVDA, JAWS or the system voice. Nothing needs to be turned
-> on - it announces itself on launch, and **F1** lists every shortcut. See
-> Section 0 below.
 
 ---
 
