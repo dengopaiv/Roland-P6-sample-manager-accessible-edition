@@ -133,8 +133,6 @@ are announced when they change and can be re-read at any time with **F8**.
 
 ---
 
----
-
 ## What's New in 4.x
 
 ### Length and tempo without pitch shift
@@ -671,7 +669,7 @@ while you work.
 
 ### 5.12 Wavetable synthesizer
 
-![Wavetable synthesizer](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6synth.png)
+![Wavetable synthesizer](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/Pyp6Synth.png)
 
 The P-6 has no oscillators, but its START knob steps through a sample in 256
 positions. Build the sample so every position lands exactly on one waveform
@@ -730,7 +728,7 @@ The ✎ button between the two lists opens the **Waveform Creator**.
 - The **orange line** shows what the P-6 will hold, over your blue drawing.
   They differ wherever your line is sharper than a segment can carry.
   
-![Wavetable synthesizer](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6PyP6ImportSingleCycle.png)
+![Wavetable synthesizer](https://github.com/j0kerpack/Roland-P6-sample-manager/blob/main/PyP6ImportSingleCycle.png)
 **Import single cycles** with the folder button. The browser on the left
 lists the files; what you send across builds up in the **Cycle Order** list
 on the right, and the import button counts it (**Import 12**). Files holding
