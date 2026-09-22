@@ -17,7 +17,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 spec = importlib.util.spec_from_file_location(
-    "pyp6app", os.path.join(HERE, "PyP6-Roland-P6-Sample-Manager_3_0_0.py"))
+    "pyp6app", os.path.join(HERE, "PyP6-Roland-P6-Sample-Manager_4_2_3.py"))
 app_module = importlib.util.module_from_spec(spec)
 sys.modules["pyp6app"] = app_module
 spec.loader.exec_module(app_module)
@@ -228,6 +228,55 @@ root.update()
 root.update_idletasks()
 check("check" in all_said().lower(), "the mono check box says checked or not",
       all_said()[:70])
+
+print("\n--- the all-banks view (4.2.3) ---")
+# F4 is the only way in from the keyboard that does not involve stepping a
+# combo box, and the switch replaces 6 pads with 48 - silently, unless the
+# toggle says which view it landed in.
+del spoken[:]
+root.event_generate("<F4>")
+root.update()
+root.update_idletasks()
+check(app._view_mode == "all", "F4 switches to the all-banks view",
+      app._view_mode)
+check("all banks" in all_said().lower(), "the switch says which view it is",
+      all_said()[:70])
+
+cell = app.overview_slots[("C", 4)]
+check("Bank C" in cell.accessible_summary() and "pad 4" in cell.accessible_summary(),
+      "a compact pad says which bank and pad it is",
+      cell.accessible_summary())
+check(a11y._group_name_for(cell.load_btn) == cell.accessible_summary(),
+      "its buttons inherit that as their group",
+      str(a11y._group_name_for(cell.load_btn)))
+
+# The bank selector has nothing to do here, and a greyed control that the
+# keyboard still stops on is exactly the dead end this layer rules out.
+check(not app_module.is_focusable(app.bank_menu),
+      "the greyed bank selector leaves the Tab order")
+
+# Alt+1..6 has to follow the view: the six full-size pads are unpacked
+# here, so focusing one would put the keyboard on a widget off screen.
+del spoken[:]
+app.focus_pad(4)
+root.update()
+focused = root.focus_get()
+active_cell = app.overview_slots[(app.current_bank.get(), 4)]
+check(focused is not None and str(focused).startswith(str(active_cell.outer)),
+      "Alt+4 lands inside the compact pad, not the hidden full-size one",
+      "landed on %s, wanted a child of %s" % (focused, active_cell.outer))
+
+del spoken[:]
+app.speak_pad_overview()
+check("all banks" in last_said().lower() and " of 6" in last_said(),
+      "F3 reports how full each bank is instead of 48 pads",
+      last_said()[:70])
+
+del spoken[:]
+root.event_generate("<F4>")
+root.update()
+root.update_idletasks()
+check(app._view_mode == "single", "F4 switches back", app._view_mode)
 
 print()
 print("=" * 60)

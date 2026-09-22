@@ -16,7 +16,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 
 spec = importlib.util.spec_from_file_location(
-    "pyp6app", os.path.join(HERE, "PyP6-Roland-P6-Sample-Manager_3_0_0.py"))
+    "pyp6app", os.path.join(HERE, "PyP6-Roland-P6-Sample-Manager_4_2_3.py"))
 app_module = importlib.util.module_from_spec(spec)
 sys.modules["pyp6app"] = app_module
 spec.loader.exec_module(app_module)
@@ -75,6 +75,17 @@ def audit(window, title):
 
 print("speech backend:", a11y.backend_name())
 audit(root, "MAIN WINDOW")
+
+# The all-banks overview is a second, entirely separate pad grid - 48 cells
+# of five identical single-letter buttons - and only one of the two grids is
+# packed at a time, so walking the window once never sees it. It is audited
+# here in its own right and then put back.
+app.set_view_mode("all")
+root.update_idletasks()
+root.update()
+audit(root, "MAIN WINDOW, all-banks view")
+app.set_view_mode("single")
+root.update()
 
 def make_test_wav():
     """A short real WAV on disk.

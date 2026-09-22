@@ -40,8 +40,8 @@ function Test-PythonImport([string]$Module) {
     return (Invoke-Python @("-c", "import $Module")).Code -eq 0
 }
 
-$Entry = "PyP6-Roland-P6-Sample-Manager_3_0_0.py"
-$Name  = "PyP6-Roland-P6-Sample-Manager_3_0_0"
+$Entry = "PyP6-Roland-P6-Sample-Manager_4_2_3.py"
+$Name  = "PyP6-Roland-P6-Sample-Manager_4_2_3"
 
 Write-Host "=== PyP6 accessible edition - Windows build ===" -ForegroundColor Cyan
 

@@ -24,8 +24,8 @@ import os
 
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
-APP_NAME = "PyP6-Roland-P6-Sample-Manager_3_0_0"
-ENTRY_SCRIPT = "PyP6-Roland-P6-Sample-Manager_3_0_0.py"
+APP_NAME = "PyP6-Roland-P6-Sample-Manager_4_2_3"
+ENTRY_SCRIPT = "PyP6-Roland-P6-Sample-Manager_4_2_3.py"
 
 datas = []
 binaries = []
