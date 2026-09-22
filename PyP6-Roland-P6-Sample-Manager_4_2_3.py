@@ -5035,7 +5035,111 @@ class WaveZoomMixin:
             # It was auditioning from the cursor; without one that is no
             # longer what should be heard.
             self._restart_from_cursor()
+        # "break" ONLY when there was something to clear. This runs off
+        # Escape, and an unconditional break aborted the rest of the
+        # binding chain - including the handler that closes the dialog.
+        # Escape therefore did nothing at all in these windows, and the
+        # audit missed it because it checks that a close handler is bound,
+        # not that pressing the key reaches it.
+        return "break" if had else None
+
+    # -- walking the preview waveform from the keyboard ----------------
+    # The main window's playback waveform has been reviewable with the
+    # arrows for a while. The preview inside these dialogs draws the same
+    # picture and had no way in at all - it was not even a Tab stop - so
+    # deciding whether a sample was the right one meant playing the whole
+    # thing and waiting, every time.
+
+    def install_wave_review(self, canvas):
+        """Makes `canvas` a Tab stop with a review cursor on it."""
+        canvas.configure(takefocus=1, highlightthickness=2,
+                         highlightbackground=WAVE_BG, highlightcolor=FOCUS_RING)
+        a11y.label(canvas, name="Preview waveform", role="graphic",
+                   value=self.describe_wave_review,
+                   help="Left and Right move a review cursor, Control with "
+                        "them moves in fine steps, Home and End jump to the "
+                        "start and the end, Enter plays from the cursor.")
+        canvas.bind("<Left>", lambda e: self._wave_review_step(-0.05), add="+")
+        canvas.bind("<Right>", lambda e: self._wave_review_step(0.05), add="+")
+        canvas.bind("<Control-Left>", lambda e: self._wave_review_step(-0.01), add="+")
+        canvas.bind("<Control-Right>", lambda e: self._wave_review_step(0.01), add="+")
+        canvas.bind("<Prior>", lambda e: self._wave_review_step(-0.25), add="+")
+        canvas.bind("<Next>", lambda e: self._wave_review_step(0.25), add="+")
+        canvas.bind("<Home>", lambda e: self._wave_review_set(0.0), add="+")
+        canvas.bind("<End>", lambda e: self._wave_review_set(1.0), add="+")
+        canvas.bind("<Return>", lambda e: self._wave_review_play(), add="+")
+        canvas.bind("<KP_Enter>", lambda e: self._wave_review_play(), add="+")
+        return canvas
+
+    def _wave_review_duration(self):
+        data = getattr(self, "_wave_data", None)
+        fs = getattr(self, "_wave_fs", None)
+        if data is None or not len(data) or not fs:
+            return None
+        return len(data) / float(fs)
+
+    def _wave_review_level(self, frac):
+        """Peak level in a window around `frac`, not the one sample sitting
+        there - a single sample can read zero in the middle of the loudest
+        note in the file."""
+        data = getattr(self, "_wave_data", None)
+        if data is None or not len(data):
+            return None
+        count = len(data)
+        half = max(1, int(count * 0.01))
+        centre = int(max(0.0, min(1.0, frac)) * (count - 1))
+        window = data[max(0, centre - half):min(count, centre + half + 1)]
+        if not len(window):
+            return None
+        try:
+            return float(np.max(np.abs(window)))
+        except Exception as _e:
+            _swallowed(_e, "WaveZoomMixin._wave_review_level")
+            return None
+
+    @staticmethod
+    def _wave_review_word(peak):
+        if peak is None:
+            return "no audio"
+        if peak < 0.005:
+            return "silence"
+        return "%d percent" % round(peak * 100)
+
+    def _wave_review_set(self, frac):
+        duration = self._wave_review_duration()
+        if duration is None:
+            a11y.speak("No sample loaded")
+            return "break"
+        frac = max(0.0, min(1.0, float(frac)))
+        self.set_zoom_cursor(frac)
+        a11y.speak("%s, %s" % (speech_duration(frac * duration),
+                               self._wave_review_word(self._wave_review_level(frac))))
         return "break"
+
+    def _wave_review_step(self, delta):
+        here = getattr(self, "_cursor_frac", None)
+        return self._wave_review_set((here if here is not None else 0.0) + delta)
+
+    def _wave_review_play(self):
+        if self._wave_review_duration() is None:
+            a11y.speak("No sample loaded")
+            return "break"
+        self._restart_from_cursor()
+        return "break"
+
+    def describe_wave_review(self):
+        duration = self._wave_review_duration()
+        if duration is None:
+            return "nothing loaded"
+        bits = [speech_duration(duration)]
+        fs = getattr(self, "_wave_fs", None)
+        if fs:
+            bits.append("%d hertz" % int(fs))
+        bits.append("peak %s" % self._wave_review_word(self._wave_review_level(0.5)))
+        cursor = getattr(self, "_cursor_frac", None)
+        bits.append("cursor at %s" % (speech_duration(cursor * duration)
+                                      if cursor is not None else "the start"))
+        return ", ".join(bits)
 
     def _draw_zoom_cursor(self):
         canvas = getattr(self, "wave_canvas", None)
@@ -6547,7 +6651,8 @@ class FolderNavMixin:
         tree.pack(side="left", fill="both", expand=True)
         add_focus_border(tree, list_frame)
         scrollbar.command = tree.yview
-        tree.bind("<BackSpace>", lambda e: self.go_up())
+        tree.bind("<BackSpace>", self.go_up)
+        self._install_type_ahead(tree)
         return tree
 
     def _folder_row(self, tree, index, name, icon=None, tags=()):
@@ -6628,15 +6733,245 @@ class FolderNavMixin:
 
     def navigate_to(self, path):
         if os.path.isdir(path):
+            self._nav_push(path)
             self.current_dir = path
             self.refresh_list()
             self._sync_folder_tree()
+            self._list_ensure_cursor()
+            # Silent while the tree itself is driving: the row the user
+            # just arrowed onto is already being announced by the tree, and
+            # repeating the folder behind every arrow key turns a walk down
+            # a branch into a stutter.
+            if not getattr(self, "_folder_tree_driving", False):
+                self._announce_arrival()
         else:
             dark_showwarning("Not Found", f"Folder does not exist:\n{path}", parent=self)
 
-    def go_up(self):
+    def go_up(self, _event=None):
         parent_dir = os.path.dirname(self.current_dir.rstrip(os.sep)) or os.sep
         self.navigate_to(parent_dir)
+        return "break"
+
+    # -- where you have been -------------------------------------------
+    # Alt+Left, Alt+Right and Alt+Up are the three keys every Windows file
+    # window answers, and these dialogs had none of them - only Backspace,
+    # which goes up but cannot undo a jump sideways through Quick access.
+
+    def _nav_push(self, path):
+        """Records a folder change, unless it IS a replay of one."""
+        if getattr(self, "_nav_replaying", False):
+            return
+        hist = getattr(self, "_nav_history", None)
+        if hist is None:
+            # Seeded with where the dialog opened, so the first Alt+Left
+            # after one step forward has somewhere to go back to.
+            start = getattr(self, "current_dir", None)
+            hist = self._nav_history = [start] if start else []
+            self._nav_index = len(hist) - 1
+        if hist and self._nav_index >= 0 and \
+                os.path.normpath(hist[self._nav_index]) == os.path.normpath(path):
+            return
+        # Anything forward of here is a branch nobody took; going somewhere
+        # new abandons it, which is what every browser and file window does.
+        del hist[self._nav_index + 1:]
+        hist.append(path)
+        self._nav_index = len(hist) - 1
+
+    def go_back(self, _event=None):
+        return self._nav_step(-1, "back")
+
+    def go_forward(self, _event=None):
+        return self._nav_step(1, "forward")
+
+    def _nav_step(self, delta, word):
+        hist = getattr(self, "_nav_history", None) or []
+        index = getattr(self, "_nav_index", -1) + delta
+        if not (0 <= index < len(hist)) or not os.path.isdir(hist[index]):
+            # Said rather than ignored: silence at the end of the history is
+            # indistinguishable from a key that does not work at all.
+            a11y.speak("No %s history" % word)
+            return "break"
+        self._nav_index = index
+        self._nav_replaying = True
+        try:
+            self.navigate_to(hist[index])
+        finally:
+            self._nav_replaying = False
+        return "break"
+
+    def _bind_explorer_keys(self):
+        """The navigation keys a Windows file window answers, bound on the
+        window itself so every control in it inherits them. A control that
+        needs one of these for something else binds it on itself and
+        returns "break", which wins - a widget binding runs first and can
+        stop the window's ever being reached."""
+        self.bind("<Alt-Left>", self.go_back, add="+")
+        self.bind("<Alt-Right>", self.go_forward, add="+")
+        self.bind("<Alt-Up>", self.go_up, add="+")
+
+    # -- Enter, and typing a name to get to it -------------------------
+
+    def _bind_list_activate(self, widget, handler):
+        """Enter does what a double-click does.
+
+        Explorer's rule, and without it these dialogs could only be
+        finished with a mouse: ttk's own Return binding on a Treeview
+        toggles a branch open, which is nothing at all on a flat list of
+        files, so Enter on a sample simply did nothing.
+        """
+        def activate(event=None):
+            try:
+                if not widget.selection() and widget.focus():
+                    # Enter acts on the row under the cursor, and that
+                    # cursor is deliberately set without a selection (see
+                    # _list_ensure_cursor), so the two are joined up here.
+                    widget.selection_set(widget.focus())
+            except Exception as _e:
+                _swallowed(_e, "FolderNavMixin._bind_list_activate")
+            handler(event)
+            return "break"
+        widget.bind("<Return>", activate, add="+")
+        widget.bind("<KP_Enter>", activate, add="+")
+        return activate
+
+    #: How long a half-typed name stays live. Windows uses about a second.
+    _TYPE_AHEAD_RESET = 0.9
+
+    def _install_type_ahead(self, tree):
+        """Lets a name be typed to jump to it, the way every Windows list
+        has since forever.
+
+        ttk has nothing of the sort, and neither does tk's Listbox, so a
+        folder of five hundred samples could only be crossed one arrow key
+        at a time - which is the difference between usable and not for
+        anyone who cannot see where the scrollbar is.
+        """
+        tree.bind("<KeyPress>", lambda e, t=tree: self._on_type_ahead(t, e),
+                  add="+")
+
+    def _type_ahead_rows(self, tree):
+        """Every row the cursor can reach right now, top to bottom.
+
+        A collapsed branch's children are not on screen, and Explorer does
+        not jump into them either - typing finds what you could have
+        arrowed to.
+        """
+        dummies = getattr(self, "_folder_tree_dummy_ids", ())
+        out = []
+
+        def walk(parent):
+            for iid in tree.get_children(parent):
+                if iid in dummies:
+                    continue
+                out.append(iid)
+                if tree.item(iid, "open"):
+                    walk(iid)
+        walk("")
+        return out
+
+    def _on_type_ahead(self, tree, event):
+        char = getattr(event, "char", "")
+        # Space is the preview toggle in the sample browser and has been
+        # for as long as it has existed; taking it for type-ahead would
+        # cost more than the handful of names it would help reach.
+        if not char or char == " " or not char.isprintable():
+            return None
+        if event.state & 0x4:           # Control held - a shortcut, not a name
+            return None
+        now = time.monotonic()
+        # Kept on the widget, not on the dialog: the folder tree and the
+        # file list are two separate searches, and sharing one buffer meant
+        # typing "s" in the list and then "d" in the tree searched the tree
+        # for "sd" and found nothing.
+        buf = getattr(tree, "_type_ahead_buf", "")
+        if now - getattr(tree, "_type_ahead_at", 0.0) > self._TYPE_AHEAD_RESET:
+            buf = ""
+        # Windows' rule: the same letter again steps through the items
+        # beginning with it, any other letter narrows the search.
+        cycling = bool(buf) and len(buf) == 1 and char.lower() == buf.lower()
+        if not cycling:
+            buf += char
+        tree._type_ahead_buf = buf
+        tree._type_ahead_at = now
+
+        rows = self._type_ahead_rows(tree)
+        if not rows:
+            return "break"
+        current = tree.focus()
+        here = rows.index(current) if current in rows else -1
+        # Extending a search keeps the row it already found; a fresh letter
+        # or a repeat looks for the NEXT one.
+        start = here if (len(buf) > 1 and not cycling) else here + 1
+
+        prefix = buf.lower()
+        for step in range(len(rows)):
+            iid = rows[(start + step) % len(rows)]
+            text = (tree.item(iid, "text") or "").strip().lower()
+            if text.startswith(prefix):
+                tree.focus(iid)
+                tree.selection_set(iid)
+                tree.see(iid)
+                return "break"
+        # Said, not swallowed: nothing happening is how a dead key feels,
+        # and there is no other way to tell that the letters went nowhere.
+        a11y.speak("%s, no match" % buf)
+        return "break"
+
+    def _list_ensure_cursor(self):
+        """Puts the file list's keyboard cursor on its first real row.
+
+        Focus, not selection: selecting fires <<TreeviewSelect>>, which in
+        the sample browser starts playing the file under Autoplay. The
+        cursor on its own is enough - ttk's arrow keys do nothing without
+        one, and the announcement reads it, so tabbing into the list names
+        a file instead of saying "no selection".
+        """
+        lst = getattr(self, "listbox", None)
+        if not isinstance(lst, ttk.Treeview):
+            return
+        try:
+            if lst.selection():
+                return
+            current = lst.focus()
+            if current and lst.exists(current):
+                return
+            rows = lst.get_children("")
+            if not rows:
+                return
+            # Past the ".." row where there is one: it is the way out, not
+            # something anyone opened this dialog to find.
+            target = rows[0]
+            for iid in rows:
+                if (lst.item(iid, "text") or "").strip() != "..":
+                    target = iid
+                    break
+            lst.focus(target)
+        except Exception as _e:
+            _swallowed(_e, "FolderNavMixin._list_ensure_cursor")
+
+    def _announce_arrival(self):
+        """Says where you landed and whether there is anything in it.
+
+        Arriving used to be announced only as a side effect of the folder
+        tree re-selecting a row, which named the folder but never said the
+        list beneath it had changed - and said nothing at all when the tree
+        could not reach the folder at all.
+        """
+        name = os.path.basename(self.current_dir.rstrip(os.sep)) or self.current_dir
+        lst = getattr(self, "listbox", None)
+        count = None
+        try:
+            if isinstance(lst, ttk.Treeview):
+                count = sum(1 for iid in lst.get_children("")
+                            if (lst.item(iid, "text") or "").strip() != "..")
+        except Exception as _e:
+            _swallowed(_e, "FolderNavMixin._announce_arrival")
+        if count is None:
+            a11y.speak(name)
+        elif count:
+            a11y.speak("%s, %d item%s" % (name, count, "" if count == 1 else "s"))
+        else:
+            a11y.speak("%s, empty" % name)
 
     def go_to_typed_path(self, event=None):
         typed = self.path_entry.get().strip()
@@ -6685,7 +7020,13 @@ class FolderNavMixin:
         box.columnconfigure(0, weight=1)
         tree = ttk.Treeview(box, show="tree", selectmode="browse",
                             style="Dark.Treeview")
-        a11y.label(tree, name="Folder tree")
+        # "tree", not the "table" every Treeview defaults to here: this one
+        # really is a tree, and the difference tells a listener that Right
+        # and Left mean something. _a11y_tree turns on the level and
+        # open/closed state in the spoken value, which would be noise on
+        # the flat file list next to it.
+        a11y.label(tree, name="Folder tree", role="tree")
+        tree._a11y_tree = True
         # stretch=False on purpose: a stretched column is forced to the
         # widget's own width no matter what it holds, which is exactly what
         # stops a long name from ever needing a scrollbar - it would just
@@ -6737,9 +7078,30 @@ class FolderNavMixin:
             self._folder_tree_bump_width(path, label)
             self._folder_tree_add_dummy(path)
         tree.bind("<<TreeviewOpen>>", self._on_folder_tree_open)
+        tree.bind("<<TreeviewClose>>", self._on_folder_tree_close)
         tree.bind("<<TreeviewSelect>>", self._on_folder_tree_select)
+        self._install_type_ahead(tree)
+        self._bind_explorer_keys()
+        # Resolved when the dialog is actually shown, not now: the list this
+        # points at is built after the sidebar in every one of these
+        # dialogs, so naming the widget here would name None.
+        self._a11y_initial_focus = self._default_focus_widget
         self._sync_folder_tree()
         return wrap
+
+    def _default_focus_widget(self):
+        """Where the keyboard should start. Explorer opens a Save dialog in
+        the File name box and an Open dialog in the file list; these follow
+        that, rather than the first button that happens to be packed."""
+        # The first listing was built straight from __init__, not through
+        # navigate_to, so nothing had put a cursor in the list yet and
+        # arriving there announced "no selection".
+        self._list_ensure_cursor()
+        for attr in ("name_entry", "listbox"):
+            widget = getattr(self, attr, None)
+            if widget is not None:
+                return widget
+        return None
 
     def _build_folder_tree_divider(self, parent):
         """A thin drag handle for the split between the folder tree and
@@ -6892,6 +7254,32 @@ class FolderNavMixin:
         iid = self.folder_tree.focus()
         if iid and iid not in self._folder_tree_dummy_ids:
             self._folder_tree_expand(iid)
+            self._speak_branch_state(iid, "expanded")
+
+    def _on_folder_tree_close(self, _event=None):
+        iid = self.folder_tree.focus()
+        if iid and iid not in self._folder_tree_dummy_ids:
+            self._speak_branch_state(iid, "collapsed")
+
+    def _speak_branch_state(self, iid, state):
+        """Right and Left changed the shape of the tree in silence, which
+        left no way to tell a branch that would not open from one that had
+        just opened onto nothing."""
+        tree = self.folder_tree
+        try:
+            name = (tree.item(iid, "text") or "").strip()
+            kids = [k for k in tree.get_children(iid)
+                    if k not in self._folder_tree_dummy_ids]
+        except Exception as _e:
+            _swallowed(_e, "FolderNavMixin._speak_branch_state")
+            return
+        if state != "expanded":
+            a11y.speak("%s, collapsed" % name)
+        elif kids:
+            a11y.speak("%s, expanded, %d folder%s"
+                       % (name, len(kids), "" if len(kids) == 1 else "s"))
+        else:
+            a11y.speak("%s, expanded, empty" % name)
 
     def _on_folder_tree_select(self, _event=None):
         if getattr(self, "_folder_tree_syncing", False):
@@ -6902,7 +7290,11 @@ class FolderNavMixin:
         path = self._folder_tree_paths.get(sel[0])
         if path and os.path.normpath(path) != \
                 os.path.normpath(getattr(self, "current_dir", "")):
-            self.navigate_to(path)
+            self._folder_tree_driving = True
+            try:
+                self.navigate_to(path)
+            finally:
+                self._folder_tree_driving = False
 
     def _folder_tree_collapse_all(self):
         tree = self.folder_tree
@@ -6916,12 +7308,41 @@ class FolderNavMixin:
             tree.item(top, open=False)
             walk(top)
 
+    def _folder_tree_ensure_cursor(self):
+        """Guarantees the tree has a focus item, so the arrow keys work.
+
+        Focus only, never selection: selecting a row fires
+        <<TreeviewSelect>> and would navigate the whole dialog somewhere
+        nobody asked to go. This only puts the cursor on the first row of
+        a tree that has none, so the first Down lands on the second row
+        instead of being swallowed.
+        """
+        tree = getattr(self, "folder_tree", None)
+        if tree is None:
+            return
+        try:
+            current = tree.focus()
+            if current and tree.exists(current):
+                return
+            roots = tree.get_children("")
+            if roots:
+                tree.focus(roots[0])
+        except Exception as _e:
+            _swallowed(_e, "FolderNavMixin._folder_tree_ensure_cursor")
+
     def _sync_folder_tree(self):
         """Opens the one branch that leads to current_dir and closes every
         other, so the tree always shows where you are rather than a growing
         pile of everywhere you have been."""
         tree = getattr(self, "folder_tree", None)
         if tree is None:
+            return
+        # A move the tree itself started is already sitting on the right
+        # row. Running the collapse-and-reopen below would rearrange the
+        # rows under the keyboard cursor mid-traversal and force the folder
+        # just reached open - which turns Down into "descend into the first
+        # child" and leaves no way to arrow on to the next sibling.
+        if getattr(self, "_folder_tree_driving", False):
             return
         target = os.path.normpath(self.current_dir)
         best_root = None
@@ -6931,6 +7352,12 @@ class FolderNavMixin:
                 if best_root is None or len(root_path) > len(best_root):
                     best_root = root_path
         self._folder_tree_syncing = True
+        # The flag above only stops THIS class's handler. The speech layer
+        # binds <<TreeviewSelect>> at the Treeview class level, so it kept
+        # reading every step of the sync out loud: selection_remove() below
+        # announced "no selection" and selection_set() at the end announced
+        # the row a second time. _a11y_skip is the hook's own opt-out.
+        tree._a11y_skip = True
         try:
             self._folder_tree_collapse_all()
             tree.selection_remove(*tree.selection())
@@ -6968,8 +7395,20 @@ class FolderNavMixin:
                     parent = cur
             if cur is not None:
                 tree.selection_set(cur)
+                # The keyboard cursor, which ttk keeps apart from the
+                # selection: its arrow keys move relative to the FOCUS
+                # item, and ttk::treeview::Keynav returns immediately
+                # while that is empty. A tree only ever selected from code
+                # therefore sat showing the current folder with Up and
+                # Down doing nothing whatsoever - it came alive only once
+                # a mouse click set the focus item, which is no use to
+                # anyone driving this dialog from the keyboard.
+                tree.focus(cur)
                 tree.see(cur)
         finally:
+            # Even a sync that found nothing to select has to leave the
+            # tree answering its arrow keys.
+            self._folder_tree_ensure_cursor()
             # Cleared on idle, not here. selection_set() above queues its
             # <<TreeviewSelect>>; clearing the flag straight away let that
             # event through as if the user had clicked the row.
@@ -6977,6 +7416,9 @@ class FolderNavMixin:
 
     def _clear_folder_tree_syncing(self):
         self._folder_tree_syncing = False
+        tree = getattr(self, "folder_tree", None)
+        if tree is not None:
+            tree._a11y_skip = False
 
 
 class FolderPickerDialog(FolderNavMixin, tk.Toplevel):
@@ -7013,7 +7455,7 @@ class FolderPickerDialog(FolderNavMixin, tk.Toplevel):
         scrollbar.pack(side="right", fill="y", padx=(3, 0))
         self.listbox = self._build_folder_listing(list_frame, scrollbar)
         self.listbox.bind("<Double-Button-1>", self.on_navigate)
-        self.listbox.bind("<Return>", self.on_navigate)
+        self._bind_list_activate(self.listbox, self.on_navigate)
 
         # No instruction line here. Double-click to open, Backspace to go up
         # and typing a path into the address bar are what every file dialog
@@ -7123,6 +7565,7 @@ class FileSaveDialog(FolderNavMixin, tk.Toplevel):
         scrollbar.pack(side="right", fill="y", padx=(3, 0))
         self.listbox = self._build_folder_listing(list_frame, scrollbar)
         self.listbox.bind("<Double-Button-1>", self.on_double_click)
+        self._bind_list_activate(self.listbox, self.on_double_click)
         self.listbox.bind("<<TreeviewSelect>>", self.on_select)
 
         # The double-click half of this was the same obvious instruction the
@@ -7283,6 +7726,7 @@ class PresetSaveDialog(FolderNavMixin, tk.Toplevel):
         self.listbox = self._build_folder_listing(list_frame, scrollbar,
                                                   preset_marks=True)
         self.listbox.bind("<Double-Button-1>", self.on_double_click)
+        self._bind_list_activate(self.listbox, self.on_double_click)
         self.listbox.bind("<<TreeviewSelect>>", self.on_select)
         a11y.label(self.listbox, name="Folders, orange ones already hold a preset")
 
@@ -7522,6 +7966,7 @@ class PresetLoadDialog(FolderNavMixin, tk.Toplevel):
         self.listbox = self._build_folder_listing(list_frame, scrollbar,
                                                   preset_marks=True)
         self.listbox.bind("<Double-Button-1>", self.on_double_click)
+        self._bind_list_activate(self.listbox, self.on_double_click)
         self.listbox.bind("<<TreeviewSelect>>", self.on_select)
         a11y.label(self.listbox, name="Presets")
 
@@ -7895,7 +8340,14 @@ class AudioPreviewDialog(LastClickMixin, WaveZoomMixin, FolderNavMixin, tk.Tople
         self._track_clicks(self.listbox)
         self.listbox.bind("<<TreeviewSelect>>", self.on_select)
         self.listbox.bind("<Double-Button-1>", self.on_confirm)
-        self.listbox.bind("<BackSpace>", lambda e: self.go_up())
+        self._bind_list_activate(self.listbox, self.on_confirm)
+        self._install_type_ahead(self.listbox)
+        self.listbox.bind("<BackSpace>", self.go_up)
+        # Sorting was a click on a column heading and nothing else. These
+        # are the same three columns, in the order the headings sit in.
+        for _key, _col in (("1", "name"), ("2", "length"), ("3", "size")):
+            self.listbox.bind("<Control-Key-%s>" % _key,
+                              lambda e, c=_col: self._sort_by_spoken(c), add="+")
 
         if multi_select:
             mid = tk.Frame(list_row, bg=BG_DARK)
@@ -7974,9 +8426,12 @@ class AudioPreviewDialog(LastClickMixin, WaveZoomMixin, FolderNavMixin, tk.Tople
             order_scroll.command = self.order_list.yview
             self._track_clicks(self.order_list)
             self.order_list.bind("<<TreeviewSelect>>", self._on_order_select)
-            self.order_list.bind("<Alt-Left>", lambda e: self._order_remove())
-            self.order_list.bind("<Alt-Up>", lambda e: self._order_move(-1))
-            self.order_list.bind("<Alt-Down>", lambda e: self._order_move(1))
+            self.order_list.bind("<Alt-Left>",
+                                 lambda e: (self._order_remove(), "break")[1])
+            self.order_list.bind("<Alt-Up>",
+                                 lambda e: (self._order_move(-1), "break")[1])
+            self.order_list.bind("<Alt-Down>",
+                                 lambda e: (self._order_move(1), "break")[1])
             self.order_list.bind("<Delete>", lambda e: self._order_remove())
             self.order_list.bind("<BackSpace>", lambda e: self._order_remove())
             # Drag a file straight across instead of selecting it and then
@@ -8090,6 +8545,7 @@ class AudioPreviewDialog(LastClickMixin, WaveZoomMixin, FolderNavMixin, tk.Tople
     "region. \"Reset\" returns the zoom to full view - it does not move "
     "the markers.")
         self.wave_canvas.bind("<Configure>", self._on_wave_canvas_resize)
+        self.install_wave_review(self.wave_canvas)
         self.wave_scrollbar = RoundedScrollbar(wave_panel.body, orient="horizontal",
                                                command=self.on_wave_scroll,
                                                parent_bg=BG_PANEL, auto_hide=False)
@@ -8271,6 +8727,18 @@ class AudioPreviewDialog(LastClickMixin, WaveZoomMixin, FolderNavMixin, tk.Tople
             self._sort_column = column
             self._sort_reverse = False
         self.refresh_list()
+
+    def _sort_by_spoken(self, column):
+        """Ctrl+1/2/3. Says what it did - a re-ordered list is invisible to
+        anyone who cannot see the arrow appear on a heading."""
+        if self.cycle_hz and column != "name":
+            a11y.speak("Only name to sort by here")
+            return "break"
+        self._sort_by(column)
+        a11y.speak("Sorted by %s, %s"
+                   % (column, "descending" if self._sort_reverse else "ascending"))
+        self._list_ensure_cursor()
+        return "break"
 
     def _update_sort_headers(self):
         """Arrows on the headings that exist.
@@ -9293,8 +9761,10 @@ class ChopDialog(LastClickMixin, WaveZoomMixin, FolderNavMixin, tk.Toplevel):
         add_focus_border(self.listbox, left_list_frame)
         left_scrollbar.command = self.listbox.yview
         self.listbox.bind("<Double-Button-1>", self.on_double_click)
+        self._bind_list_activate(self.listbox, self.on_double_click)
+        self._install_type_ahead(self.listbox)
         self.listbox.bind("<<TreeviewSelect>>", self.on_browse_select)
-        self.listbox.bind("<BackSpace>", lambda e: self.go_up())
+        self.listbox.bind("<BackSpace>", self.go_up)
 
 
         # --- MIDDLE: transfer column ---
@@ -9603,6 +10073,7 @@ class ChopDialog(LastClickMixin, WaveZoomMixin, FolderNavMixin, tk.Toplevel):
                     "Drag the selection onto the list on the right to add it - "
                     "with hits detected, drag a single piece the same way.")
         self.wave_canvas.bind("<Configure>", self._on_wave_canvas_resize)
+        self.install_wave_review(self.wave_canvas)
         self._draw_wave_hint()
         self.wave_canvas.bind("<ButtonPress-1>", self.on_wave_press)
         self.wave_canvas.bind("<B1-Motion>", self.on_wave_drag)
@@ -29152,6 +29623,16 @@ class P6ManagerApp:
         ("In the waveform: Ctrl+Left / Right", "Move it by 1 percent"),
         ("In the waveform: Home / End", "Jump to the start or the end"),
         ("In the waveform: Enter", "Play from the review cursor"),
+        # The file dialogs are meant to feel like a Windows file window, so
+        # the keys are listed in the words that window would use.
+        ("In a file dialog: Enter", "Open the folder, or choose the file"),
+        ("In a file dialog: type a name", "Jump to it; the same letter again "
+                                          "steps to the next match"),
+        ("In a file dialog: Backspace or Alt+Up", "Go up one folder"),
+        ("In a file dialog: Alt+Left / Alt+Right", "Back and forward"),
+        ("In a file dialog: Ctrl+1 / 2 / 3", "Sort by name, length or size"),
+        ("In the folder tree: Right / Left", "Open or close the branch"),
+        ("In the sample browser: Space", "Play or stop the preview"),
     ]
 
     def show_keyboard_help(self):

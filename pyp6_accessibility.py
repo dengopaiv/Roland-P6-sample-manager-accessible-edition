@@ -434,6 +434,23 @@ def _treeview_value(widget):
         parts = [str(item.get("text") or "")]
         parts += [str(v) for v in (item.get("values") or [])]
         text = ", ".join(p for p in parts if p)
+        if getattr(widget, "_a11y_tree", False):
+            # A row in a tree means little without the shape around it:
+            # whether anything hangs off it, whether that is showing, and
+            # how deep it sits. Only for widgets that really are trees -
+            # on the flat file list beside this one every row would be
+            # "level 1", which is noise on each and every arrow key.
+            state = []
+            if widget.get_children(focused):
+                is_open = str(item.get("open", 0)).lower() in ("1", "true", "yes")
+                state.append("expanded" if is_open else "collapsed")
+            depth = 0
+            parent = widget.parent(focused)
+            while parent:
+                depth += 1
+                parent = widget.parent(parent)
+            state.append("level %d" % (depth + 1))
+            text = ", ".join([text] + state)
         siblings = widget.get_children(widget.parent(focused))
         position = None
         if focused in siblings:
@@ -1112,14 +1129,30 @@ def is_focusable(widget):
     try:
         if not widget.winfo_exists() or not widget.winfo_ismapped():
             return False
-        takefocus = _cget(widget, "takefocus")
+        takefocus = str(_cget(widget, "takefocus") or "")
         # An explicit -takefocus is checked before -state, and Tk agrees:
         # "disabled" on a Text means read-only, not unreachable, and a
         # read-only box of warnings still has to be reachable to be read.
         # Controls that genuinely go dead (a greyed-out button) set
         # takefocus to 0 themselves, so nothing slips through here.
-        if takefocus not in ("", None):
-            return str(takefocus) in ("1", "true", "yes")
+        if takefocus in ("1", "true", "yes"):
+            return True
+        if takefocus in ("0", "false", "no"):
+            return False
+        if takefocus:
+            # Anything else is a SCRIPT, which Tk calls with the widget path
+            # and reads the answer from - and every ttk widget ships one,
+            # "ttk::takefocus". Comparing it against "1" the way a literal
+            # is compared answered "not focusable" for every ttk widget in
+            # the app: both Treeviews in the file dialogs, which are the
+            # controls those dialogs are FOR. That took them out of the
+            # audit's coverage and made first_focusable() unable to ever
+            # open a dialog on its list. Run the script, as Tk does.
+            try:
+                return bool(widget.tk.getboolean(
+                    widget.tk.call(takefocus, str(widget))))
+            except Exception:
+                pass  # Not callable after all - fall through to the classes.
         if _is_disabled(widget):
             return False
         # Tk's own rule for an empty -takefocus is "does this widget or its
@@ -1220,7 +1253,29 @@ def prepare_dialog(window, service, announce=True, initial_focus=None):
         window.bind("<Escape>", on_escape, add="+")
 
     def settle():
+        # Geometry first. A dialog is mapped before its deeper panels have
+        # been laid out, and is_focusable() answers "no" for a widget that
+        # is not mapped yet - so without this the control a dialog asks to
+        # open on was rejected for not existing on screen yet, and focus
+        # fell back to whatever button happened to be packed first.
+        try:
+            window.update_idletasks()
+        except Exception:
+            pass
         target = initial_focus
+        if target is None:
+            # A dialog that knows better than "first control in the layout"
+            # says so here. Explorer opens in the file list, not on the
+            # toolbar above it, and first_focusable() can only ever answer
+            # with whatever happens to be packed first.
+            wanted = getattr(window, "_a11y_initial_focus", None)
+            if callable(wanted):
+                try:
+                    wanted = wanted()
+                except Exception:
+                    wanted = None
+            if wanted is not None and is_focusable(wanted):
+                target = wanted
         if target is None:
             try:
                 current = window.focus_get()

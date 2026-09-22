@@ -218,6 +218,166 @@ if helps:
     root.update()
     check(not window.winfo_exists(), "Escape actually closed it")
 
+print("\n--- the folder tree in the sample browser ---")
+# ttk moves a tree with the arrow keys from its FOCUS item, not its
+# selection, and does nothing at all while that item is empty. The sidebar
+# is only ever selected from code (_sync_folder_tree), so without a focus
+# item it looked like it was sitting on the current folder while Up and
+# Down were dead - a tree only a mouse could drive.
+import shutil
+import tempfile
+
+tree_base = tempfile.mkdtemp(prefix="p6tree_")
+for _name in ("alpha", "bravo", "charlie"):
+    os.makedirs(os.path.join(tree_base, _name, "inner"), exist_ok=True)
+
+browser = app_module.AudioPreviewDialog(
+    root, initial_dir=os.path.join(tree_base, "alpha"))
+settle(300)
+tree = browser.folder_tree
+check(tree.focus() == os.path.join(tree_base, "alpha"),
+      "the folder tree's keyboard cursor starts on the current folder",
+      repr(tree.focus()))
+
+tree.focus_set()
+root.update()
+press(tree, "<Up>")
+check(tree.focus() == tree_base, "Up in the tree reaches the parent",
+      repr(tree.focus()))
+check(os.path.normpath(browser.current_dir) == os.path.normpath(tree_base),
+      "and the file list follows it there", browser.current_dir)
+check(bool(spoken), "the row it landed on is spoken", all_said())
+
+# Three rows down from the parent: into the open alpha, back out of it, and
+# on to bravo. The tree used to be collapsed and reopened on every one of
+# these, which moved the rows out from under the cursor mid-traversal.
+for _ in range(3):
+    press(tree, "<Down>")
+check(tree.focus() == os.path.join(tree_base, "bravo"),
+      "Down walks on to the next sibling instead of the tree rebuilding"
+      " itself under the cursor", repr(tree.focus()))
+check(not tree.item(os.path.join(tree_base, "bravo"), "open"),
+      "arrowing onto a folder does not force it open")
+press(tree, "<Right>")
+check(tree.item(os.path.join(tree_base, "bravo"), "open"),
+      "Right opens the branch")
+
+browser.navigate_to(os.path.join(tree_base, "charlie"))
+root.update()
+check(tree.focus() == os.path.join(tree_base, "charlie"),
+      "navigating from elsewhere carries the tree cursor along",
+      repr(tree.focus()))
+
+browser.destroy()
+root.update()
+
+
+print("\n--- the sample browser answers Explorer's keys ---")
+# The Load button on a pad opens AudioPreviewDialog, and "as close to a
+# Windows file dialog as it can be" is the bar it is held to here.
+for _n in ("kick.wav", "snare.wav", "shaker.wav"):
+    _w = __import__("wave").open(os.path.join(tree_base, "alpha", _n), "wb")
+    _w.setnchannels(1); _w.setsampwidth(2); _w.setframerate(44100)
+    _w.writeframes(__import__("struct").pack("<4410h", *([0] * 4410)))
+    _w.close()
+
+browser = app_module.AudioPreviewDialog(
+    root, initial_dir=os.path.join(tree_base, "alpha"))
+settle(300)
+files = browser.listbox
+
+check(app_module.is_focusable(files) and app_module.is_focusable(browser.folder_tree),
+      "ttk lists count as keyboard stops, so the audit can see them at all")
+check(root.focus_get() is files, "the dialog opens in the file list, not on a toolbar button",
+      str(root.focus_get()))
+check(bool(files.focus()) and "no selection" not in all_said(),
+      "arriving names a file instead of saying 'no selection'", all_said()[-60:])
+
+# Type-ahead: the only way to cross a folder of hundreds without sight.
+files.focus_set()
+root.update()
+press(files, "<KeyPress-s>")
+first = (files.item(files.focus(), "text") or "").strip()
+press(files, "<KeyPress-s>")
+second = (files.item(files.focus(), "text") or "").strip()
+check(first.lower().startswith("s"), "typing a letter jumps to that name", first)
+check(second.lower().startswith("s") and second != first,
+      "the same letter again steps to the next one", "%s then %s" % (first, second))
+press(files, "<KeyPress-q>")
+check("no match" in all_said(), "a search that finds nothing says so", all_said()[-40:])
+
+# Alt+Left / Alt+Right / Alt+Up.
+browser.navigate_to(tree_base)
+root.update()
+press(files, "<Alt-Left>")
+check(os.path.normpath(browser.current_dir) == os.path.join(tree_base, "alpha"),
+      "Alt+Left goes back", browser.current_dir)
+press(files, "<Alt-Right>")
+check(os.path.normpath(browser.current_dir) == os.path.normpath(tree_base),
+      "Alt+Right goes forward", browser.current_dir)
+
+# Arriving is announced once, and says what is there.
+browser.navigate_to(tree_base)
+root.update()
+del spoken[:]
+browser.navigate_to(os.path.join(tree_base, "bravo"))
+root.update()
+root.update_idletasks()
+check(len([t for t in spoken if "bravo" in t]) == 1,
+      "the folder you land in is named exactly once", all_said())
+check(any("item" in t or "empty" in t for t in spoken),
+      "and says what is in it", all_said())
+
+# The tree sounds like a tree.
+value, _pos = a11y.value_of(browser.folder_tree)
+check(a11y.role_of(browser.folder_tree) == "tree" and "level" in value,
+      "the sidebar announces as a tree, with the row's level",
+      "%s / %s" % (a11y.role_of(browser.folder_tree), value))
+del spoken[:]
+press(browser.folder_tree, "<Right>")
+check("expanded" in all_said(), "Right says the branch expanded", all_said()[:60])
+
+# Sorting, and the preview waveform.
+press(files, "<Control-Key-2>")
+check(browser._sort_column == "length" and "Sorted by length" in all_said(),
+      "Ctrl+2 sorts by length and says so", all_said()[:60])
+check(browser.wave_canvas in app_module.focusable_within(browser),
+      "the preview waveform is a Tab stop")
+
+# The two lists are two separate searches. One shared buffer meant a letter
+# typed in the file list was still in the tree's search a moment later, so
+# the tree looked for "sd" and found nothing.
+press(files, "<KeyPress-x>")          # leaves "x" in the FILE LIST's buffer
+press(browser.folder_tree, "<KeyPress-a>")
+check(getattr(browser.folder_tree, "_type_ahead_buf", None) == "a",
+      "the tree's type-ahead is not polluted by what was typed in the list",
+      repr(getattr(browser.folder_tree, "_type_ahead_buf", None)))
+check((getattr(files, "_type_ahead_buf", "") or "").endswith("x"),
+      "and the list keeps its own, which the tree's letter did not join",
+      repr(getattr(files, "_type_ahead_buf", None)))
+
+# Enter finishes the dialog, which nothing but a double-click used to do.
+browser.navigate_to(os.path.join(tree_base, "alpha"))
+root.update()
+for _iid in files.get_children():
+    if "kick" in (files.item(_iid, "text") or ""):
+        files.focus(_iid)
+        break
+files.focus_set()
+root.update()
+files.event_generate("<Return>")
+root.update()
+root.update_idletasks()
+check(bool(browser.selected_path) and browser.selected_path.endswith("kick.wav"),
+      "Enter on a sample chooses it", browser.selected_path)
+check(not browser.winfo_exists(), "and closes the dialog")
+if browser.winfo_exists():
+    browser.destroy()
+root.update()
+
+
+shutil.rmtree(tree_base, ignore_errors=True)
+
 print("\n--- a check box announces its new state ---")
 pad = app.pad_widgets[1]
 del spoken[:]

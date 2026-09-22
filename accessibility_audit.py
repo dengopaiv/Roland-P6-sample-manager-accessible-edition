@@ -154,7 +154,19 @@ if "--dialogs" in sys.argv:
             window.update()
             audit(window, "DIALOG: " + title)
             if not getattr(window, "_a11y_escape_bound", False):
-                problems.append("%s: Escape does not close it" % title)
+                problems.append("%s: nothing is bound to Escape" % title)
+            else:
+                # Actually press it. The flag above only says a handler was
+                # attached, and a handler EARLIER in the chain that returns
+                # "break" stops it ever being reached - which is exactly
+                # what the zoom-cursor handler in the browsers did, while
+                # this check reported them fine for years.
+                target = app_module.first_focusable(window) or window
+                target.event_generate("<Escape>")
+                root.update()
+                root.update_idletasks()
+                if window.winfo_exists():
+                    problems.append("%s: Escape does not close it" % title)
         finally:
             try:
                 window.grab_release()

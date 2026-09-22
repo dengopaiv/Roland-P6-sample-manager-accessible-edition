@@ -101,12 +101,44 @@ Tab order rather than becoming dead stops.
 | `In the waveform: Ctrl+Left / Right` | Move it by 1 percent |
 | `In the waveform: Home / End` | Jump to the start or the end |
 | `In the waveform: Enter` | Play from the review cursor |
+| `In a file dialog: Enter` | Open the folder, or choose the file |
+| `In a file dialog: type a name` | Jump to it; the same letter again steps to the next match |
+| `In a file dialog: Backspace or Alt+Up` | Go up one folder |
+| `In a file dialog: Alt+Left / Alt+Right` | Back and forward |
+| `In a file dialog: Ctrl+1 / 2 / 3` | Sort by name, length or size |
+| `In the folder tree: Right / Left` | Open or close the branch |
+| `In the sample browser: Space` | Play or stop the preview |
 
 Selectors (sample rate, bank, theme, ...) behave like a Windows combo box:
 **Up/Down** step through the values and announce each one with its position
 in the list, **Home/End** jump to the ends, and **Enter** opens the full list
 - as a list you can arrow through, not as a drawn menu, so the nested
 entries like the bank selector's *Copy To* / *Move To* are reachable too.
+
+### Choosing a sample: the file dialogs
+
+Loading a sample, saving a preset and picking a folder all open the same
+kind of window, and it is meant to answer the keys a Windows file window
+answers. Focus starts in the file list (in the *File name* box where there
+is one), not on a toolbar button.
+
+- **Type a name** to jump to it. Pressing the same letter again steps to
+  the next match, and letters typed together narrow the search - the same
+  rule Explorer uses. It works in the file list and in the folder tree.
+- **Enter** opens the folder under the cursor, or chooses the file and
+  closes the dialog. Nothing but a double-click used to do this.
+- **Backspace** or **Alt+Up** goes up a folder; **Alt+Left** and
+  **Alt+Right** step back and forward through where you have been.
+- The **folder tree** on the left announces itself as a tree: each row says
+  its level, and whether it is collapsed or expanded. **Right** and **Left**
+  open and close a branch and say which. Moving in it moves the file list.
+- Arriving anywhere names the folder and how many items are in it, once.
+- **Ctrl+1 / 2 / 3** sort the sample list by name, length or size, and say
+  which way round.
+- The preview waveform in the sample browser is a control of its own - see
+  below; the keys are the same ones the main window's waveform uses.
+- **Escape** clears the review cursor if one is set, and otherwise closes
+  the dialog.
 
 ### Reading a waveform without seeing it
 
