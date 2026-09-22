@@ -16,10 +16,12 @@ files built from several sources at once, **time-stretching that changes
 length without moving pitch**, and a **wavetable synthesizer** that turns a
 pad into 255 waveforms you step through with the START knob.
 
-> **Windows users:** a prebuilt **Windows x64 executable** is available,
-> built with PyInstaller and bundling **all dependencies, including
-> ffmpeg/ffprobe**. No Python installation, pip packages, or separate
-> ffmpeg setup are required - just download and run. See Section 2.1.
+> **Windows users:** one command builds a standalone **Windows x64
+> executable** with PyInstaller, bundling **all dependencies, including
+> ffmpeg/ffprobe and the screen reader libraries**. The machine you run it
+> on needs no Python, pip packages or separate ffmpeg setup. This fork does
+> not ship a prebuilt one - upstream's has no accessibility layer in it.
+> See Section 2.1.
 
 If it saves you time, there is a Ko-fi link under **Settings → Donate**:
 [ko-fi.com/j0kerpack](https://ko-fi.com/j0kerpack). The app is free and
@@ -337,17 +339,32 @@ than 8.6.15 the Synth dialog can come up with its family lists unpainted;
 
 ## 2. Installation (Windows)
 
-### 2.1 Option A: Prebuilt Windows x64 Executable (recommended, no setup)
+### 2.1 Option A: Prebuilt Windows x64 Executable (no setup)
 
-A standalone `.exe` is provided for 64-bit Windows. It is built with
-PyInstaller in `--onefile` mode and has **every dependency bundled inside
-it**, including Python itself, pydub, sounddevice/soundfile, and
-**ffmpeg.exe / ffprobe.exe**. There is nothing else to install.
+> **This fork does not currently ship one.** Upstream's prebuilt `.exe` is
+> built from upstream's source and therefore has **none of the
+> accessibility layer** in it - it is a single blank rectangle to NVDA and
+> JAWS, which is the whole problem this edition exists to fix. Running it
+> would defeat the point, so it is not offered here.
+>
+> Build your own instead - it takes one command and produces exactly the
+> same kind of self-contained `.exe`, with speech included:
+>
+> ```
+> powershell -ExecutionPolicy Bypass -File build_windows_exe.ps1
+> ```
+>
+> See Section 7. It bundles **every dependency inside the file** - Python
+> itself, pydub, sounddevice/soundfile, `accessible_output2` with the NVDA
+> and Dolphin controller DLLs, and **ffmpeg.exe / ffprobe.exe** - so there
+> is nothing to install on the machine you run it on. Check **Settings ->
+> About -> Speech output** in the result to confirm which screen reader it
+> resolved to.
+>
+> Windows SmartScreen or your antivirus may flag an unsigned executable on
+> first run; choose "Run anyway" / allow it if you trust the source.
 
-1. Download the `.exe`.
-2. Double-click to run it - no Python, pip, or ffmpeg setup required.
-3. Windows SmartScreen or your antivirus may flag an unsigned executable on
-   first run; choose "Run anyway" / allow it if you trust the source.
+Otherwise, run from source - Section 2.2.
 
 ### 2.2 Option B: Run from Source
 
